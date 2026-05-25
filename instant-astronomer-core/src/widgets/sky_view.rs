@@ -360,10 +360,15 @@ impl Widget for SkyViewWidget {
             }
         }
 
-        // Stars.
+        // Stars. Cull anything below the real-world horizon so the
+        // ground band at the bottom of the screen reads as actual
+        // ground — no stars peeking out from below.
         ctx.set_font(Arc::clone(&self.font));
         for star in BRIGHTEST_STARS {
             let horiz = equatorial_to_horizontal(star.coords, lat, lst);
+            if horiz.alt < 0.0 {
+                continue;
+            }
             let Some(pos) = self.project_horizontal(horiz, &rot, center, focal_length) else {
                 continue;
             };
@@ -407,8 +412,14 @@ impl Widget for SkyViewWidget {
         // Solar System bodies. Render brighter / larger discs for the body
         // sizes the user cares about (Sun, Moon big; Venus + Jupiter
         // notably brighter than fixed stars; the others sit between).
+        // Same below-horizon cull as for stars — the Sun and planets
+        // can plausibly be below the horizon, and we don't want them
+        // floating above the ground band.
         for body in calculate_solar_system_bodies(self.timestamp_ms.get()) {
             let horiz = equatorial_to_horizontal(body.coords, lat, lst);
+            if horiz.alt < 0.0 {
+                continue;
+            }
             let Some(pos) = self.project_horizontal(horiz, &rot, center, focal_length) else {
                 continue;
             };
@@ -462,34 +473,13 @@ impl Widget for SkyViewWidget {
             });
         }
 
-        // Horizon ring — paints cardinal directions at altitude 0 so the
-        // user can orient themselves before the device telemetry kicks in.
-        let directions: [(&str, f64); 8] = [
-            ("N", 0.0),
-            ("NE", PI / 4.0),
-            ("E", PI / 2.0),
-            ("SE", 3.0 * PI / 4.0),
-            ("S", PI),
-            ("SW", 5.0 * PI / 4.0),
-            ("W", 3.0 * PI / 2.0),
-            ("NW", 7.0 * PI / 4.0),
-        ];
-        let horizon = Color::from_rgba8(255, 100, 100, 120);
-        for (name, az) in directions {
-            let hc = HorizontalCoords { alt: 0.0, az };
-            if let Some(pos) = self.project_horizontal(hc, &rot, center, focal_length) {
-                if pos.x >= 0.0 && pos.x <= w && pos.y >= 0.0 && pos.y <= h {
-                    Self::fill_disc(ctx, pos, 3.0, horizon);
-                    Self::draw_text(
-                        ctx,
-                        Point::new(pos.x - 6.0, pos.y + 6.0),
-                        12.0,
-                        horizon,
-                        name,
-                    );
-                }
-            }
-        }
+        // Horizon strip — a stable horizontal reference at the bottom
+        // of the viewport so the user always knows where the ground is,
+        // no matter how they pan / tilt the phone. Cardinal direction
+        // labels (N / NE / E / …) slide along the strip based on the
+        // user's current heading, matching the actual real-world
+        // direction each label points at on the celestial sphere.
+        Self::paint_horizon_strip(ctx, Arc::clone(&self.font), w, h, &rot, center, focal_length);
 
         // Selected-body info card. Drawn last so the panel sits above any
         // overlapping stars / labels. We look the selection up in the
@@ -513,6 +503,118 @@ impl Widget for SkyViewWidget {
 }
 
 impl SkyViewWidget {
+    /// Paint a horizontal horizon line at the bottom of the sky view
+    /// with a faint "ground" band below it and cardinal direction
+    /// labels (N / NE / E / …) sliding along its top edge.
+    ///
+    /// The line itself sits at a fixed Y so the user always has a
+    /// stable bottom-of-screen reference — a screen orientation
+    /// you can trust no matter how the phone is rotated. Cardinal
+    /// labels use the *current* projection of each compass direction
+    /// on the celestial sphere to pick their X position, so as the
+    /// user pans the sky the labels slide accordingly.
+    fn paint_horizon_strip(
+        ctx: &mut dyn DrawCtx,
+        font: Arc<Font>,
+        w: f64,
+        _h: f64,
+        rot: &nalgebra::Matrix3<f64>,
+        center: Point,
+        focal_length: f64,
+    ) {
+        // Bottom band reserved for the ground + horizon line. Tuned so
+        // it doesn't eat too much sky on small phones but is still big
+        // enough for a readable label row.
+        let ground_h = 36.0_f64;
+        let horizon_y = ground_h; // top edge of the ground band (Y-up)
+
+        // Ground fill: subtle dark band so the eye knows "this isn't sky".
+        ctx.set_fill_color(Color::from_rgba8(4, 4, 10, 220));
+        ctx.begin_path();
+        ctx.rect(0.0, 0.0, w, ground_h);
+        ctx.fill();
+
+        // Soft horizon glow just above the line — lifts the line off
+        // the deep-indigo sky so it reads as the horizon, not just a
+        // UI divider.
+        for i in 0..6 {
+            let alpha = 18 - i * 3;
+            let yy = horizon_y + i as f64;
+            ctx.set_stroke_color(Color::from_rgba8(120, 100, 80, alpha.max(0) as u8));
+            ctx.set_line_width(1.0);
+            ctx.begin_path();
+            ctx.move_to(0.0, yy);
+            ctx.line_to(w, yy);
+            ctx.stroke();
+        }
+
+        // The horizon line itself — warm tone, clearly visible against
+        // the indigo sky.
+        ctx.set_stroke_color(Color::from_rgba8(255, 180, 120, 200));
+        ctx.set_line_width(1.2);
+        ctx.begin_path();
+        ctx.move_to(0.0, horizon_y);
+        ctx.line_to(w, horizon_y);
+        ctx.stroke();
+
+        // Cardinal labels: compute the projected X for each direction
+        // on the alt=0 ring and pin the label at that X with Y = on
+        // the horizon line. Skip labels whose projected direction is
+        // behind the camera (depth <= 0).
+        let directions: [(&str, f64); 8] = [
+            ("N", 0.0),
+            ("NE", PI / 4.0),
+            ("E", PI / 2.0),
+            ("SE", 3.0 * PI / 4.0),
+            ("S", PI),
+            ("SW", 5.0 * PI / 4.0),
+            ("W", 3.0 * PI / 2.0),
+            ("NW", 7.0 * PI / 4.0),
+        ];
+
+        ctx.set_font(font);
+        for (name, az) in directions {
+            let hc = HorizontalCoords { alt: 0.0, az };
+            let v_cart = horizontal_to_cartesian(hc);
+            let v_rot = rot * v_cart;
+            let (x, _, z) = (v_rot.x, v_rot.y, v_rot.z);
+            if z <= 0.05 {
+                continue;
+            }
+            let projected_x = center.x + (x / z) * focal_length;
+            if projected_x < -20.0 || projected_x > w + 20.0 {
+                continue;
+            }
+
+            // Tick mark straddling the horizon line.
+            ctx.set_stroke_color(Color::from_rgba8(255, 200, 140, 220));
+            ctx.set_line_width(if name.len() == 1 { 1.6 } else { 1.0 });
+            ctx.begin_path();
+            ctx.move_to(projected_x, horizon_y - 6.0);
+            ctx.line_to(projected_x, horizon_y + 6.0);
+            ctx.stroke();
+
+            // Cardinal label below the line. Bigger / brighter for the
+            // four cardinals (N, E, S, W); smaller / dimmer for the
+            // inter-cardinals.
+            let is_cardinal = name.len() == 1;
+            let label_size = if is_cardinal { 13.0 } else { 10.0 };
+            let label_color = if is_cardinal {
+                if name == "N" {
+                    Color::from_rgb8(255, 110, 110) // red for North
+                } else {
+                    Color::from_rgb8(255, 220, 160)
+                }
+            } else {
+                Color::from_rgba8(255, 200, 150, 180)
+            };
+            let approx_w = name.chars().count() as f64 * label_size * 0.6;
+            ctx.set_fill_color(label_color);
+            ctx.set_font_size(label_size);
+            ctx.fill_text(name, projected_x - approx_w / 2.0, 6.0);
+        }
+    }
+
     /// Paint a small info card anchored near `target`. Card stays inside the
     /// `viewport` rect — flips to the other side of the body if it would
     /// otherwise clip the right / top edges.

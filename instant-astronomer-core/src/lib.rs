@@ -64,7 +64,10 @@ pub trait AstronomerPlatform: 'static {
 ///
 /// Shells write into `yaw`/`pitch`/`roll` from device-orientation events,
 /// keep `timestamp_ms` advancing every frame, and may write `latitude` /
-/// `longitude` from the platform geolocation pipeline.
+/// `longitude` from the platform geolocation pipeline. `calibration_yaw`
+/// is a per-session offset applied before the projection so the user can
+/// re-align "what my phone is pointing at" to "what the app shows" — see
+/// [`build_astronomer_app`]'s calibrate button.
 pub struct AstronomerHandles {
     pub latitude: Rc<Cell<f64>>,
     pub longitude: Rc<Cell<f64>>,
@@ -72,6 +75,11 @@ pub struct AstronomerHandles {
     pub yaw: Rc<Cell<f64>>,
     pub pitch: Rc<Cell<f64>>,
     pub roll: Rc<Cell<f64>>,
+    /// Subtracted from `yaw` before the projection runs. Lets the user
+    /// tap a "Calibrate to North" button while pointing roughly at
+    /// north and have the rendered sky snap into alignment with where
+    /// they're actually looking. Stored in **radians**.
+    pub calibration_yaw: Rc<Cell<f64>>,
 }
 
 /// Build the shared Instant-Astronomer widget tree. Both the native and
@@ -89,6 +97,7 @@ pub fn build_astronomer_app<P: AstronomerPlatform>(
     let yaw = Rc::new(Cell::new(0.0));
     let pitch = Rc::new(Cell::new(0.0));
     let roll = Rc::new(Cell::new(0.0));
+    let calibration_yaw = Rc::new(Cell::new(0.0));
     let show_constellations = Rc::new(Cell::new(true));
     let search_text = Rc::new(std::cell::RefCell::new(String::new()));
     let search_status = Rc::new(std::cell::RefCell::new(String::from("Type a city to search")));
@@ -100,6 +109,7 @@ pub fn build_astronomer_app<P: AstronomerPlatform>(
         yaw: Rc::clone(&yaw),
         pitch: Rc::clone(&pitch),
         roll: Rc::clone(&roll),
+        calibration_yaw: Rc::clone(&calibration_yaw),
     };
 
     let sky_widget = SkyViewWidget::new(
