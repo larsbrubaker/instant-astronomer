@@ -1,0 +1,34 @@
+[package]
+name = "instant-astronomer-wasm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "WebAssembly (wasm-bindgen) shell for Instant-Astronomer."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+instant-astronomer-core = { path = "../instant-astronomer-core" }
+agg-gui = { workspace = true }
+demo-wgpu = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+console_error_panic_hook = "0.1"
+wgpu = { version = "29", default-features = false, features = ["wgsl", "webgl"] }
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Document",
+    "HtmlCanvasElement",
+    "Storage",
+    "Location",
+    "console",
+] }

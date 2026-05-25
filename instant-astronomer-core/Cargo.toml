@@ -1,0 +1,24 @@
+[package]
+name = "instant-astronomer-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core astronomical calculation and user interface code for Instant-Astronomer."
+
+[dependencies]
+agg-gui = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+web-time = { workspace = true }
+nalgebra = { workspace = true }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+rand = "0.8"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+
+[lib]
+crate-type = ["rlib"]

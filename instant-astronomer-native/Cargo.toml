@@ -1,0 +1,24 @@
+[package]
+name = "instant-astronomer-native"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Native shell (winit + wgpu) for Instant-Astronomer."
+
+[[bin]]
+name = "instant-astronomer-native"
+path = "src/main.rs"
+test = false
+
+[dependencies]
+instant-astronomer-core = { path = "../instant-astronomer-core" }
+agg-gui = { workspace = true, features = ["winit-adapter", "clipboard"] }
+demo-wgpu = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+pollster = "0.4"
+wgpu = { version = "29", default-features = false, features = ["wgsl", "vulkan", "dx12", "metal"] }
+winit = "0.30"

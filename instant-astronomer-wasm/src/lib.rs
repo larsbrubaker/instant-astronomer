@@ -1,0 +1,398 @@
+//! # WebAssembly Shell for Instant-Astronomer
+//!
+//! This crate is the WebAssembly shell compiled for `wasm32-unknown-unknown`.
+//! It exposes the entrypoints to the browser, binds to the HTML5 `<canvas>`,
+//! handles DOM pointer, wheel, and keyboard inputs, and integrates with the browser's native
+//! `navigator.geolocation` API to determine the user's coordinates.
+
+#![cfg(target_arch = "wasm32")]
+
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+use std::sync::Arc;
+
+use agg_gui::{App, Modifiers, MouseButton};
+use demo_wgpu::{begin_frame, WgpuGfxCtx};
+use instant_astronomer_core::{
+    build_astronomer_app, load_default_font, AstronomerHandles, AstronomerPlatform,
+};
+use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
+
+thread_local! {
+    static APP: RefCell<Option<App>> = const { RefCell::new(None) };
+    static HANDLES: RefCell<Option<AstronomerHandles>> = const { RefCell::new(None) };
+    static WGPU_INIT: RefCell<Option<WgpuInit>> = const { RefCell::new(None) };
+    static WGPU_CTX: RefCell<Option<WgpuGfxCtx>> = const { RefCell::new(None) };
+    static NEEDS_DRAW: Cell<bool> = const { Cell::new(true) };
+}
+
+struct WgpuInit {
+    device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
+    surface: wgpu::Surface<'static>,
+    surface_format: wgpu::TextureFormat,
+    config: wgpu::SurfaceConfiguration,
+}
+
+/// WebAssembly implementation of the AstronomerPlatform.
+struct WasmPlatform {
+    latitude: Rc<Cell<f64>>,
+    longitude: Rc<Cell<f64>>,
+}
+
+impl AstronomerPlatform for WasmPlatform {
+    fn request_geolocation(&self) {
+        let window = match web_sys::window() {
+            Some(w) => w,
+            None => return,
+        };
+        let navigator = window.navigator();
+        let geolocation = match navigator.geolocation() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+
+        let lat_clone = Rc::clone(&self.latitude);
+        let lng_clone = Rc::clone(&self.longitude);
+
+        let success_callback = wasm_bindgen::closure::Closure::wrap(Box::new(move |pos: web_sys::Position| {
+            let coords = pos.coords();
+            lat_clone.set(coords.latitude());
+            lng_clone.set(coords.longitude());
+            web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&format!(
+                "WASM Geolocation Success: Latitude {}, Longitude {}",
+                coords.latitude(), coords.longitude()
+            )));
+            agg_gui::animation::request_draw();
+            mark_dirty();
+        }) as Box<dyn FnMut(web_sys::Position)>);
+
+        let error_callback = wasm_bindgen::closure::Closure::wrap(Box::new(move |err: web_sys::PositionError| {
+            web_sys::console::error_1(&wasm_bindgen::JsValue::from_str(&format!(
+                "WASM Geolocation Error (code {}): {}",
+                err.code(), err.message()
+            )));
+        }) as Box<dyn FnMut(web_sys::PositionError)>);
+
+        let _ = geolocation.get_current_position_with_error_callback(
+            success_callback.as_ref().unchecked_ref(),
+            Some(error_callback.as_ref().unchecked_ref()),
+        );
+
+        // Keep callbacks alive (leak to let browser invoke them whenever it finishes)
+        success_callback.forget();
+        error_callback.forget();
+    }
+}
+
+#[wasm_bindgen(start)]
+pub fn start() {
+    console_error_panic_hook::set_once();
+    ensure_app();
+
+    // Spawn async initialization of wgpu on the browser canvas
+    wasm_bindgen_futures::spawn_local(async {
+        match init_wgpu_async().await {
+            Ok(init) => {
+                WGPU_INIT.with(|c| *c.borrow_mut() = Some(init));
+            }
+            Err(err) => {
+                web_sys::console::error_1(&JsValue::from_str(&format!("WASM wgpu init failed: {err}")));
+            }
+        }
+        mark_dirty();
+    });
+}
+
+#[derive(Debug)]
+struct WebDisplay;
+
+impl wgpu::rwh::HasDisplayHandle for WebDisplay {
+    fn display_handle(&self) -> Result<wgpu::rwh::DisplayHandle<'_>, wgpu::rwh::HandleError> {
+        Ok(wgpu::rwh::DisplayHandle::web())
+    }
+}
+
+async fn init_wgpu_async() -> Result<WgpuInit, String> {
+    let document = web_sys::window()
+        .ok_or_else(|| "no global window".to_string())?
+        .document()
+        .ok_or_else(|| "no document".to_string())?;
+    let canvas = document
+        .get_element_by_id("astronomer-canvas")
+        .ok_or_else(|| "#astronomer-canvas element not found".to_string())?
+        .dyn_into::<web_sys::HtmlCanvasElement>()
+        .map_err(|_| "#astronomer-canvas is not a canvas element".to_string())?;
+
+    let mut instance_desc = wgpu::InstanceDescriptor::new_with_display_handle(Box::new(WebDisplay));
+    instance_desc.backends = wgpu::Backends::GL;
+    let instance = wgpu::Instance::new(instance_desc);
+    let surface = instance
+        .create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone()))
+        .map_err(|err| format!("create_surface: {err:?}"))?;
+
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::default(),
+            compatible_surface: Some(&surface),
+            force_fallback_adapter: false,
+        })
+        .await
+        .ok_or_else(|| "request_adapter failed".to_string())?;
+
+    let adapter_limits = adapter.limits();
+    let (device, queue) = adapter
+        .request_device(&wgpu::DeviceDescriptor {
+            label: Some("astronomer-wasm-wgpu"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter_limits),
+            memory_hints: wgpu::MemoryHints::Performance,
+            experimental_features: wgpu::ExperimentalFeatures::default(),
+            trace: wgpu::Trace::Off,
+        })
+        .await
+        .map_err(|err| format!("request_device: {err:?}"))?;
+
+    let caps = surface.get_capabilities(&adapter);
+    let surface_format = caps
+        .formats
+        .iter()
+        .copied()
+        .find(|f| !f.is_srgb())
+        .unwrap_or(caps.formats[0]);
+
+    let config = wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format: surface_format,
+        width: canvas.width().max(1),
+        height: canvas.height().max(1),
+        present_mode: wgpu::PresentMode::AutoVsync,
+        desired_maximum_frame_latency: 2,
+        alpha_mode: caps.alpha_modes[0],
+        view_formats: vec![],
+    };
+    surface.configure(&device, &config);
+
+    Ok(WgpuInit {
+        device: Arc::new(device),
+        queue: Arc::new(queue),
+        surface,
+        surface_format,
+        config,
+    })
+}
+
+fn ensure_app() {
+    APP.with(|cell| {
+        if cell.borrow().is_some() {
+            return;
+        }
+        let font = load_default_font();
+        let lat_cell = Rc::new(Cell::new(39.7392));
+        let lng_cell = Rc::new(Cell::new(-104.9903));
+
+        let platform = WasmPlatform {
+            latitude: Rc::clone(&lat_cell),
+            longitude: Rc::clone(&lng_cell),
+        };
+
+        let (app, handles) = build_astronomer_app(font, platform);
+        handles.latitude.set(lat_cell.get());
+        handles.longitude.set(lng_cell.get());
+
+        HANDLES.with(|h| *h.borrow_mut() = Some(handles));
+        *cell.borrow_mut() = Some(app);
+    });
+}
+
+fn ensure_wgpu_ctx(width: f32, height: f32) {
+    WGPU_CTX.with(|ctx_cell| {
+        if ctx_cell.borrow().is_some() {
+            return;
+        }
+        WGPU_INIT.with(|init_cell| {
+            let init = init_cell.borrow();
+            let Some(init) = init.as_ref() else {
+                return;
+            };
+            let ctx = WgpuGfxCtx::new(
+                Arc::clone(&init.device),
+                Arc::clone(&init.queue),
+                init.surface_format,
+                width,
+                height,
+            );
+            *ctx_cell.borrow_mut() = Some(ctx);
+        });
+    });
+}
+
+#[wasm_bindgen]
+pub fn mark_dirty() {
+    NEEDS_DRAW.set(true);
+}
+
+#[wasm_bindgen]
+pub fn draw_frame() -> bool {
+    ensure_app();
+
+    // Grab current canvas size
+    let window = match web_sys::window() {
+        Some(w) => w,
+        None => return false,
+    };
+    let document = match window.document() {
+        Some(d) => d,
+        None => return false,
+    };
+    let canvas = match document.get_element_by_id("astronomer-canvas") {
+        Some(el) => match el.dyn_into::<web_sys::HtmlCanvasElement>() {
+            Ok(c) => c,
+            Err(_) => return false,
+        },
+        None => return false,
+    };
+
+    let w = canvas.width();
+    let h = canvas.height();
+    if w == 0 || h == 0 {
+        return false;
+    }
+
+    ensure_wgpu_ctx(w as f32, h as f32);
+
+    WGPU_INIT.with(|init_cell| {
+        let mut init_mut = init_cell.borrow_mut();
+        let Some(init) = init_mut.as_mut() else {
+            return;
+        };
+
+        // Resize surface configuration if canvas dimensions changed
+        if init.config.width != w || init.config.height != h {
+            init.config.width = w;
+            init.config.height = h;
+            init.surface.configure(&init.device, &init.config);
+            WGPU_CTX.with(|ctx_cell| {
+                if let Some(ctx) = ctx_cell.borrow_mut().as_mut() {
+                    ctx.reset(w as f32, h as f32);
+                }
+            });
+        }
+    });
+
+    let frame = WGPU_INIT.with(|init_cell| {
+        let init = init_cell.borrow();
+        let Some(init) = init.as_ref() else {
+            return None;
+        };
+        match init.surface.get_current_texture() {
+            Ok(wgpu::CurrentSurfaceTexture::Success(f)) => Some(f),
+            Ok(wgpu::CurrentSurfaceTexture::Suboptimal(f)) => Some(f),
+            _ => None,
+        }
+    });
+
+    let Some(frame) = frame else {
+        return false;
+    };
+
+    let view = frame
+        .texture
+        .create_view(&wgpu::TextureViewDescriptor::default());
+
+    // Update timestamp continuously
+    HANDLES.with(|h_cell| {
+        if let Some(h) = h_cell.borrow().as_ref() {
+            let now = web_time::SystemTime::now()
+                .duration_since(web_time::SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64;
+            h.timestamp_ms.set(now);
+        }
+    });
+
+    APP.with(|app_cell| {
+        if let Some(app) = app_cell.borrow_mut().as_mut() {
+            app.layout(Size::new(w as f64, h as f64));
+
+            WGPU_CTX.with(|ctx_cell| {
+                if let Some(ctx) = ctx_cell.borrow_mut().as_mut() {
+                    ctx.set_surface_texture(frame.texture.clone());
+                    ctx.reset(w as f32, h as f32);
+                    begin_frame(ctx, view);
+                    app.paint(ctx);
+                    ctx.end_frame();
+                }
+            });
+        }
+    });
+
+    frame.present();
+    NEEDS_DRAW.set(false);
+
+    // Request another draw if animations are running
+    APP.with(|app_cell| {
+        if let Some(app) = app_cell.borrow().as_ref() {
+            app.wants_draw()
+        } else {
+            false
+        }
+    })
+}
+
+// Event routing from JavaScript frontend
+#[wasm_bindgen]
+pub fn on_mouse_move(x: f64, y: f64) {
+    APP.with(|app_cell| {
+        if let Some(app) = app_cell.borrow_mut().as_mut() {
+            app.on_mouse_move(x, y);
+        }
+    });
+}
+
+#[wasm_bindgen]
+pub fn on_mouse_down(x: f64, y: f64, button: u8, shift: bool, ctrl: bool, alt: bool, meta: bool) {
+    APP.with(|app_cell| {
+        if let Some(app) = app_cell.borrow_mut().as_mut() {
+            let btn = match button {
+                0 => MouseButton::Left,
+                1 => MouseButton::Middle,
+                2 => MouseButton::Right,
+                b => MouseButton::Other(b),
+            };
+            let mods = Modifiers { shift, ctrl, alt, meta };
+            app.on_mouse_down(x, y, btn, mods);
+        }
+    });
+}
+
+#[wasm_bindgen]
+pub fn on_mouse_up(x: f64, y: f64, button: u8, shift: bool, ctrl: bool, alt: bool, meta: bool) {
+    APP.with(|app_cell| {
+        if let Some(app) = app_cell.borrow_mut().as_mut() {
+            let btn = match button {
+                0 => MouseButton::Left,
+                1 => MouseButton::Middle,
+                2 => MouseButton::Right,
+                b => MouseButton::Other(b),
+            };
+            let mods = Modifiers { shift, ctrl, alt, meta };
+            app.on_mouse_up(x, y, btn, mods);
+        }
+    });
+}
+
+#[wasm_bindgen]
+pub fn on_device_orientation(alpha_deg: f64, beta_deg: f64, gamma_deg: f64) {
+    // Synchronize phone sensor values
+    // Convert degrees to radians and pipe into the core state cells
+    HANDLES.with(|h_cell| {
+        if let Some(h) = h_cell.borrow().as_ref() {
+            h.yaw.set(alpha_deg.to_radians());
+            h.pitch.set(beta_deg.to_radians());
+            h.roll.set(gamma_deg.to_radians());
+        }
+    });
+    agg_gui::animation::request_draw();
+}

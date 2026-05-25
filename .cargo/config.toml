@@ -1,0 +1,10 @@
+[alias]
+dev = [
+    "watch",
+    "-i",
+    "target",
+    "-i",
+    "instant-astronomer-wasm",
+    "-x",
+    "run -p instant-astronomer-native",
+]
