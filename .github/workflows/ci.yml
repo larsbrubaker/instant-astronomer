@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout instant-astronomer
+        uses: actions/checkout@v4
+        with:
+          path: instant-astronomer
+
+      - name: Checkout sibling agg-gui (path-patched in Cargo.toml)
+        uses: actions/checkout@v4
+        with:
+          repository: larsbrubaker/agg-gui
+          path: agg-gui
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            instant-astronomer/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('instant-astronomer/Cargo.lock') }}
+
+      - name: Build native
+        working-directory: instant-astronomer
+        run: cargo build --workspace
+
+      - name: Run tests
+        working-directory: instant-astronomer
+        run: cargo test --workspace
+
+  build-wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout instant-astronomer
+        uses: actions/checkout@v4
+        with:
+          path: instant-astronomer
+
+      - name: Checkout sibling agg-gui
+        uses: actions/checkout@v4
+        with:
+          repository: larsbrubaker/agg-gui
+          path: agg-gui
+
+      - name: Install Rust + wasm32 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build WASM
+        working-directory: instant-astronomer
+        run: |
+          wasm-pack build instant-astronomer-wasm \
+            --target web \
+            --out-dir ../demo/public/pkg \
+            --no-typescript

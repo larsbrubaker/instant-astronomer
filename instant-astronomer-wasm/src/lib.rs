@@ -307,7 +307,10 @@ pub fn draw_frame() -> bool {
         .texture
         .create_view(&wgpu::TextureViewDescriptor::default());
 
-    // Update timestamp continuously
+    // Update timestamp continuously so celestial-body positions animate.
+    // The JS shell can override this between frames via `set_timestamp_ms`
+    // to lock the projection to a specific moment (e.g. "show me what the
+    // sky will look like tonight at 9pm").
     HANDLES.with(|h_cell| {
         if let Some(h) = h_cell.borrow().as_ref() {
             let now = web_time::SystemTime::now()
@@ -389,10 +392,18 @@ pub fn on_mouse_up(x: f64, y: f64, button: u8, shift: bool, ctrl: bool, alt: boo
     });
 }
 
+/// Push a smoothed compass + tilt reading from the browser's
+/// `deviceorientation` (or `deviceorientationabsolute`) event.
+///
+/// Inputs are in **degrees**, matching the browser API. The JS shell is
+/// responsible for picking the right "alpha" value:
+/// - On iOS, `event.webkitCompassHeading` (clockwise from north) is what
+///   you want — pass `360 - heading` so we end up with the counter-
+///   clockwise yaw the rotation matrix expects.
+/// - On Android Chrome with `deviceorientationabsolute`, pass `event.alpha`
+///   directly.
 #[wasm_bindgen]
 pub fn on_device_orientation(alpha_deg: f64, beta_deg: f64, gamma_deg: f64) {
-    // Synchronize phone sensor values
-    // Convert degrees to radians and pipe into the core state cells
     HANDLES.with(|h_cell| {
         if let Some(h) = h_cell.borrow().as_ref() {
             h.yaw.set(alpha_deg.to_radians());
@@ -401,4 +412,47 @@ pub fn on_device_orientation(alpha_deg: f64, beta_deg: f64, gamma_deg: f64) {
         }
     });
     agg_gui::animation::request_draw();
+    mark_dirty();
+}
+
+/// Set the user's latitude / longitude in **degrees** directly from the
+/// JS shell (e.g. after `navigator.geolocation.getCurrentPosition` resolves
+/// or a user picks a location in an OS picker).
+#[wasm_bindgen]
+pub fn set_location_degrees(latitude_deg: f64, longitude_deg: f64) {
+    HANDLES.with(|h_cell| {
+        if let Some(h) = h_cell.borrow().as_ref() {
+            h.latitude.set(latitude_deg);
+            h.longitude.set(longitude_deg);
+        }
+    });
+    agg_gui::animation::request_draw();
+    mark_dirty();
+}
+
+/// Override the projection clock — useful for "what will the sky look like
+/// at sunset" simulations or for unit testing against a fixed timestamp.
+/// Passing `0` reverts to whatever the next frame's wall-clock reading is.
+#[wasm_bindgen]
+pub fn set_timestamp_ms(timestamp_ms: f64) {
+    HANDLES.with(|h_cell| {
+        if let Some(h) = h_cell.borrow().as_ref() {
+            h.timestamp_ms.set(timestamp_ms as i64);
+        }
+    });
+    agg_gui::animation::request_draw();
+    mark_dirty();
+}
+
+/// Returns `true` if the app currently wants another frame painted.
+/// Lets the JS rAF loop go idle when nothing is animating.
+#[wasm_bindgen]
+pub fn wants_draw() -> bool {
+    APP.with(|app_cell| {
+        app_cell
+            .borrow()
+            .as_ref()
+            .map(|app| app.wants_draw())
+            .unwrap_or(false)
+    })
 }
