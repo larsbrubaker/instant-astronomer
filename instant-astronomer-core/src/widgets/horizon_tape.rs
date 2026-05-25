@@ -105,7 +105,16 @@ impl Widget for HorizonTapeWidget {
         Self::stroke_segment(ctx, Point::new(cx, 0.0), Point::new(cx, 6.0), 2.0, indicator);
 
         // Compass marks: 4 px per degree, ±half-screen.
-        let yaw_deg = self.yaw.get().to_degrees();
+        //
+        // The `yaw` cell stores the W3C `alpha` convention: angle
+        // measured **counter-clockwise** from magnetic north (so
+        // alpha = 90° = facing west). Compass tape labels are in the
+        // standard **clockwise** convention (N=0, E=90, S=180, W=270).
+        // Convert here so the tick that matches the user's actual
+        // heading slides under the centre indicator.
+        let yaw_w3c_deg = self.yaw.get().to_degrees();
+        let mut yaw_deg = -yaw_w3c_deg;
+        yaw_deg = ((yaw_deg % 360.0) + 360.0) % 360.0;
         let pixels_per_degree = 4.0_f64;
         let half_visible_deg = (cx / pixels_per_degree) as i32;
         let start_deg = (yaw_deg as i32 - half_visible_deg - 5).max(-360);

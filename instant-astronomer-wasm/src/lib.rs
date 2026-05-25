@@ -447,12 +447,29 @@ pub fn software_keyboard_visible() -> bool {
     agg_gui::widgets::on_screen_keyboard::is_visible()
 }
 
+/// Push a smoothed compass + tilt reading from the browser's
+/// `deviceorientation` (or `deviceorientationabsolute`) event.
+///
+/// Conversions performed here so the math layer can use direct radians:
+///
+/// - `alpha_deg`: W3C alpha — CCW from magnetic north when the device
+///   is face up. Stored directly as yaw (radians). The JS shell hands
+///   in `event.alpha` on Android-absolute or `360 - webkitCompassHeading`
+///   on iOS so the value is always W3C-CCW.
+/// - `beta_deg`: front-to-back tilt. 0 = flat face-up; 90 = upright;
+///   180 = face-down. The sky-view's matrix wants `pitch = 0` to mean
+///   "looking at the horizon", so we subtract 90. Without this
+///   subtraction simply holding the phone upright already looked 90°
+///   above the horizon and stars near the horizon couldn't be reached.
+/// - `gamma_deg`: left-to-right tilt. Stored as roll; the matrix
+///   currently ignores it so a slight phone roll doesn't bank the
+///   horizon, but the cell is kept up to date for future use.
 #[wasm_bindgen]
 pub fn on_device_orientation(alpha_deg: f64, beta_deg: f64, gamma_deg: f64) {
     HANDLES.with(|h_cell| {
         if let Some(h) = h_cell.borrow().as_ref() {
             h.yaw.set(alpha_deg.to_radians());
-            h.pitch.set(beta_deg.to_radians());
+            h.pitch.set((beta_deg - 90.0).to_radians());
             h.roll.set(gamma_deg.to_radians());
         }
     });

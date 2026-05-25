@@ -221,42 +221,54 @@ pub fn horizontal_to_cartesian(coords: HorizontalCoords) -> Vector3<f64> {
     Vector3::new(x, y, z)
 }
 
-/// Construct a 3D Rotation Matrix from device orientation Euler angles (Alpha, Beta, Gamma) in radians.
+/// Construct the world→camera rotation matrix used by the sky-view
+/// projection.
 ///
-/// - Alpha (Yaw/Compass): rotation around Z axis
-/// - Beta (Pitch): rotation around X axis
-/// - Gamma (Roll): rotation around Y axis
-pub fn device_orientation_matrix(alpha: f64, beta: f64, gamma: f64) -> Matrix3<f64> {
-    // Rotation around Z axis (alpha/yaw)
-    let c_a = alpha.cos();
-    let s_a = alpha.sin();
-    let r_z = Matrix3::new(
-        c_a, -s_a, 0.0,
-        s_a,  c_a, 0.0,
-        0.0,  0.0, 1.0,
+/// Our world frame is **Y-up, Z-north, X-east** (Y is the zenith axis).
+/// So the angles plug in as follows:
+///
+/// - `yaw` (compass / `alpha`, in W3C CCW-from-north convention): rotation
+///   around **Y** (the zenith). +yaw = the camera turns counter-clockwise
+///   when viewed from above (i.e. swings toward west).
+/// - `pitch` (look up / down): rotation around **X** (east). +pitch = the
+///   camera tilts up toward zenith.
+/// - `roll` (camera bank): rotation around **Z** (north). Currently the
+///   sky-view passes 0 in for roll because tracking the user's phone
+///   roll just makes the horizon line jitter; the math is ready for it
+///   if we want to wire it back in.
+///
+/// Composition order: `Rx(pitch) * Ry(yaw)`. Apply yaw first (around the
+/// world zenith) so a horizontal pan sweeps the compass; then pitch
+/// (around the world east axis). This is the standard FPS-camera
+/// "yaw-then-pitch" Tait-Bryan YXZ that doesn't roll the horizon when
+/// the user simply turns in place.
+///
+/// **Note**: an earlier version of this function rotated yaw around our
+/// Z axis (which is *north*, not up) — that put a "roll" into what was
+/// labelled "yaw" and was the cause of the compass tape not sliding
+/// correctly when the user spun in place.
+pub fn device_orientation_matrix(yaw: f64, pitch: f64, _roll: f64) -> Matrix3<f64> {
+    // Yaw around the world up axis (+Y / zenith).
+    let c_y = yaw.cos();
+    let s_y = yaw.sin();
+    let r_y = Matrix3::new(
+        c_y,  0.0, s_y,
+        0.0,  1.0, 0.0,
+       -s_y,  0.0, c_y,
     );
 
-    // Rotation around X axis (beta/pitch)
-    let c_b = beta.cos();
-    let s_b = beta.sin();
+    // Pitch around the world east axis (+X).
+    let c_p = pitch.cos();
+    let s_p = pitch.sin();
     let r_x = Matrix3::new(
         1.0, 0.0,  0.0,
-        0.0, c_b, -s_b,
-        0.0, s_b,  c_b,
+        0.0, c_p, -s_p,
+        0.0, s_p,  c_p,
     );
 
-    // Rotation around Y axis (gamma/roll)
-    let c_g = gamma.cos();
-    let s_g = gamma.sin();
-    let r_y = Matrix3::new(
-        c_g,  0.0, s_g,
-        0.0,  1.0, 0.0,
-       -s_g,  0.0, c_g,
-    );
-
-    // Combine rotations: standard mobile device spec uses Y * X * Z or similar ordering.
-    // Here we compute the complete camera transformation matrix.
-    r_z * r_x * r_y
+    // World → camera: first the yaw (around world up), then pitch
+    // (around world east). Matrix product is reversed: Rx * Ry.
+    r_x * r_y
 }
 
 #[cfg(test)]
@@ -283,5 +295,46 @@ mod tests {
 
         assert!(horiz.alt >= -PI/2.0 && horiz.alt <= PI/2.0);
         assert!(horiz.az >= 0.0 && horiz.az <= 2.0 * PI);
+    }
+
+    /// Regression test for the yaw-axis bug. Before the fix,
+    /// `device_orientation_matrix` rotated yaw around the world Z axis
+    /// (which in our frame is *north*, not up) so what the code called
+    /// "yaw" was actually a roll. Now yaw correctly rotates around the
+    /// zenith (Y).
+    ///
+    /// With yaw=90° CCW (= facing west) and pitch=0:
+    /// - North (0,0,1) should swing toward camera-east  -> +X side of
+    ///   the rotated frame.
+    /// - Zenith (0,1,0) should stay at +Y (yaw doesn't tilt the head).
+    #[test]
+    fn yaw_rotates_around_zenith_not_north() {
+        let r = device_orientation_matrix((PI / 2.0).into(), 0.0, 0.0);
+        let north = nalgebra::Vector3::new(0.0, 0.0, 1.0);
+        let zenith = nalgebra::Vector3::new(0.0, 1.0, 0.0);
+        let n_rot = r * north;
+        let z_rot = r * zenith;
+
+        // North should rotate into +X (camera-right) when facing west.
+        assert!((n_rot.x - 1.0).abs() < 1e-9, "n_rot.x = {}", n_rot.x);
+        assert!(n_rot.y.abs() < 1e-9, "n_rot.y = {}", n_rot.y);
+        assert!(n_rot.z.abs() < 1e-9, "n_rot.z = {}", n_rot.z);
+
+        // Zenith must not move when only yaw changes.
+        assert!((z_rot.x).abs() < 1e-9, "z_rot.x = {}", z_rot.x);
+        assert!((z_rot.y - 1.0).abs() < 1e-9, "z_rot.y = {}", z_rot.y);
+        assert!((z_rot.z).abs() < 1e-9, "z_rot.z = {}", z_rot.z);
+    }
+
+    /// Pitch rotates around the world east axis (+X). Tilting up (pitch
+    /// = +90°) brings the zenith to the camera-forward direction (+Z).
+    #[test]
+    fn pitch_brings_zenith_into_view_when_looking_up() {
+        let r = device_orientation_matrix(0.0, (PI / 2.0).into(), 0.0);
+        let zenith = nalgebra::Vector3::new(0.0, 1.0, 0.0);
+        let z_rot = r * zenith;
+        assert!(z_rot.x.abs() < 1e-9, "z_rot.x = {}", z_rot.x);
+        assert!(z_rot.y.abs() < 1e-9, "z_rot.y = {}", z_rot.y);
+        assert!((z_rot.z - 1.0).abs() < 1e-9, "z_rot.z = {}", z_rot.z);
     }
 }
