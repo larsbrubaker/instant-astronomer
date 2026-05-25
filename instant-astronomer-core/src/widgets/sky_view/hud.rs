@@ -262,37 +262,39 @@ pub(super) fn paint_centre_reticle(
     // Paint the name immediately below the reticle so the eye can read
     // it without moving — proximate to where the user is aiming.
     ctx.set_font(font);
-    let name_size = 13.0_f64;
+    let name_size = 14.0_f64;
     let detail_size = 11.0_f64;
-    let pad = 6.0_f64;
+    let pad_x = 12.0_f64;
+    let pad_y = 9.0_f64;
+    let line_gap = 5.0_f64;
     let name = body.name.clone();
     let mag_label = format!("mag {:+.1}", body.magnitude);
-    let approx = |s: &str, sz: f64| (s.chars().count() as f64) * sz * 0.6 + pad * 2.0;
+    let approx = |s: &str, sz: f64| (s.chars().count() as f64) * sz * 0.6 + pad_x * 2.0;
     let card_w = approx(&name, name_size).max(approx(&mag_label, detail_size));
-    let card_h = name_size + detail_size + pad * 2.0 + 4.0;
+    let card_h = name_size + detail_size + line_gap + pad_y * 2.0;
     let card_x = (centre.x - card_w / 2.0).clamp(8.0, w - card_w - 8.0);
-    let card_top = centre.y - RETICLE_RADIUS - 4.0;
+    let card_top = centre.y - RETICLE_RADIUS - 6.0;
     let card_y = (card_top - card_h).max(8.0);
 
-    ctx.set_fill_color(Color::from_rgba8(15, 20, 38, 220));
+    ctx.set_fill_color(Color::from_rgba8(15, 20, 38, 230));
     ctx.begin_path();
-    ctx.rounded_rect(card_x, card_y, card_w, card_h, 6.0);
+    ctx.rounded_rect(card_x, card_y, card_w, card_h, 7.0);
     ctx.fill();
     ctx.set_stroke_color(Color::from_rgba8(255, 215, 90, 180));
     ctx.set_line_width(1.0);
     ctx.begin_path();
-    ctx.rounded_rect(card_x, card_y, card_w, card_h, 6.0);
+    ctx.rounded_rect(card_x, card_y, card_w, card_h, 7.0);
     ctx.stroke();
 
     ctx.set_fill_color(Color::from_rgb8(255, 235, 150));
     ctx.set_font_size(name_size);
-    let name_baseline = card_y + card_h - pad - name_size * 0.2;
-    ctx.fill_text(&name, card_x + pad, name_baseline);
+    let name_baseline = card_y + card_h - pad_y - name_size * 0.25;
+    ctx.fill_text(&name, card_x + pad_x, name_baseline);
 
     ctx.set_fill_color(Color::from_rgb8(200, 205, 225));
     ctx.set_font_size(detail_size);
-    let mag_baseline = card_y + pad - detail_size * 0.1;
-    ctx.fill_text(&mag_label, card_x + pad, mag_baseline);
+    let mag_baseline = card_y + pad_y - detail_size * 0.15;
+    ctx.fill_text(&mag_label, card_x + pad_x, mag_baseline);
 }
 
 /// Paint the projected `alt = 0` horizon line as a dim curve across

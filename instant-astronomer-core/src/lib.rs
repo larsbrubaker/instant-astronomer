@@ -31,7 +31,7 @@ use std::sync::Arc;
 use agg_gui::color::Color;
 use agg_gui::layout_props::Insets;
 use agg_gui::text::Font;
-use agg_gui::widgets::{Button, Checkbox, Container, FlexColumn, FlexRow, TextField};
+use agg_gui::widgets::{Button, Checkbox, Conditional, Container, FlexColumn, FlexRow, TextField};
 use agg_gui::App;
 
 use crate::widgets::horizon_tape::HorizonTapeWidget;
@@ -99,6 +99,10 @@ pub fn build_astronomer_app<P: AstronomerPlatform>(
     let roll = Rc::new(Cell::new(0.0));
     let calibration_yaw = Rc::new(Cell::new(0.0));
     let show_constellations = Rc::new(Cell::new(true));
+    // Default to geolocation (the common case on phones). Unchecking
+    // reveals the city search field. They never need to be on at the
+    // same time — geolocation already gives the exact lat/lng.
+    let use_geolocation = Rc::new(Cell::new(true));
     let search_text = Rc::new(std::cell::RefCell::new(String::new()));
     let search_status = Rc::new(std::cell::RefCell::new(String::from("Type a city to search")));
 
@@ -134,6 +138,7 @@ pub fn build_astronomer_app<P: AstronomerPlatform>(
         Rc::clone(&yaw),
         Rc::clone(&calibration_yaw),
         Rc::clone(&show_constellations),
+        Rc::clone(&use_geolocation),
         Rc::clone(&search_text),
         Rc::clone(&search_status),
     );
@@ -159,16 +164,39 @@ fn build_control_panel<P: AstronomerPlatform>(
     yaw: Rc<Cell<f64>>,
     calibration_yaw: Rc<Cell<f64>>,
     show_constellations: Rc<Cell<bool>>,
+    use_geolocation: Rc<Cell<bool>>,
     search_text: Rc<std::cell::RefCell<String>>,
     search_status: Rc<std::cell::RefCell<String>>,
 ) -> Container {
     let platform = Rc::new(platform);
 
+    // Geolocation re-fetch button (works in both modes — even when the
+    // user has unchecked "Use geolocation", a quick re-tap fills the
+    // city search field with the current location to seed a city
+    // lookup).
     let geo_button = {
         let platform = Rc::clone(&platform);
-        Button::new("Geolocation", Arc::clone(&font)).on_click(move || {
+        Button::new("Locate me", Arc::clone(&font)).on_click(move || {
             platform.request_geolocation();
         })
+    };
+
+    // Toggle: when checked the app uses the device's reported
+    // geolocation; when unchecked the city-search field appears so the
+    // user can pick a location by name. Both at once is redundant.
+    // Maintain an inverted `show_search` cell so the `Conditional`
+    // wrapping the search row can stay declarative — Checkbox's
+    // `with_state_cell` writes `use_geolocation` automatically; the
+    // `on_change` closure just mirrors that to `show_search`.
+    let show_search = Rc::new(Cell::new(!use_geolocation.get()));
+    let geo_checkbox = {
+        let show_search = Rc::clone(&show_search);
+        Checkbox::new("Use geolocation", Arc::clone(&font), use_geolocation.get())
+            .with_state_cell(Rc::clone(&use_geolocation))
+            .on_change(move |checked| {
+                show_search.set(!checked);
+                agg_gui::animation::request_draw();
+            })
     };
 
     let constellation_checkbox = Checkbox::new(
@@ -215,6 +243,7 @@ fn build_control_panel<P: AstronomerPlatform>(
 
     let row_1 = FlexRow::new()
         .with_gap(12.0)
+        .add(Box::new(geo_checkbox))
         .add(Box::new(geo_button))
         .add(Box::new(calibrate_button))
         .add(Box::new(constellation_checkbox))
@@ -290,10 +319,14 @@ fn build_control_panel<P: AstronomerPlatform>(
         .add(Box::new(search_button))
         .add_flex(Box::new(status_label), 1.0);
 
+    // Hide the search row entirely while "Use geolocation" is checked
+    // — the FlexColumn's gap is also suppressed for hidden children.
+    let row_2_conditional = Conditional::new(Rc::clone(&show_search), Box::new(row_2));
+
     let inner = FlexColumn::new()
         .with_gap(8.0)
         .add(Box::new(row_1))
-        .add(Box::new(row_2));
+        .add(Box::new(row_2_conditional));
 
     Container::new()
         .add(Box::new(inner))
