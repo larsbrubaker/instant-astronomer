@@ -66,6 +66,11 @@ pub(crate) struct Selection {
     pub name: String,
     pub magnitude: f32,
     pub detail: Option<String>,
+    /// Last-known screen position. Used as a fallback for things that
+    /// don't appear in the per-frame `painted` cache (constellation
+    /// lines) and as the anchor for the hover card while the cursor
+    /// is over a segment.
+    pub pos: Point,
 }
 
 /// A constellation line segment in screen coordinates after projection.
@@ -120,6 +125,11 @@ pub struct SkyViewWidget {
     painted_lines: RefCell<Vec<PaintedSegment>>,
     /// Body the user most recently tapped on. Renders as an info card.
     selected: Option<Selection>,
+    /// Whatever is currently under the cursor (no click required). When
+    /// `selected` is None we paint the hovered card instead so moving
+    /// over a constellation line surfaces its name without a click.
+    /// Cleared when the pointer lands on nothing.
+    hovered: RefCell<Option<Selection>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -157,6 +167,7 @@ impl SkyViewWidget {
             painted_bodies: RefCell::new(Vec::new()),
             painted_lines: RefCell::new(Vec::new()),
             selected: None,
+            hovered: RefCell::new(None),
         }
     }
 
@@ -197,9 +208,27 @@ impl SkyViewWidget {
         // anchor the info-card position at the closest point ON the
         // segment so the card pops up where the tap actually landed
         // on the line, not at one of the endpoint stars.
+        //
+        // Bounding-box pre-check: a segment whose AABB doesn't overlap
+        // the tap-radius circle can't possibly contain a hit, so we
+        // skip the point-to-segment distance calc entirely. This makes
+        // hover hit-testing (which runs on every MouseMove) cheap
+        // enough to keep running even as the catalog of asterisms
+        // grows.
         let lines = self.painted_lines.borrow();
         let mut best_line: Option<(f64, &PaintedSegment, Point)> = None;
         for seg in lines.iter() {
+            let min_x = seg.p0.x.min(seg.p1.x) - LINE_HIT_RADIUS;
+            let max_x = seg.p0.x.max(seg.p1.x) + LINE_HIT_RADIUS;
+            let min_y = seg.p0.y.min(seg.p1.y) - LINE_HIT_RADIUS;
+            let max_y = seg.p0.y.max(seg.p1.y) + LINE_HIT_RADIUS;
+            if tap_pos.x < min_x
+                || tap_pos.x > max_x
+                || tap_pos.y < min_y
+                || tap_pos.y > max_y
+            {
+                continue;
+            }
             let (dist, closest) = point_to_segment_distance(tap_pos, seg.p0, seg.p1);
             if dist > LINE_HIT_RADIUS {
                 continue;
@@ -297,6 +326,48 @@ fn point_to_segment_distance(p: Point, a: Point, b: Point) -> (f64, Point) {
     ((dx * dx + dy * dy).sqrt(), closest)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `t`-clamping branches: point projects past the endpoints should
+    /// resolve to the endpoint, not to the extended line.
+    #[test]
+    fn segment_distance_clamps_to_endpoints() {
+        let a = Point::new(0.0, 0.0);
+        let b = Point::new(10.0, 0.0);
+        // Past the start of the segment.
+        let (d, c) = point_to_segment_distance(Point::new(-5.0, 0.0), a, b);
+        assert_eq!(d, 5.0);
+        assert_eq!((c.x, c.y), (0.0, 0.0));
+        // Past the end.
+        let (d, c) = point_to_segment_distance(Point::new(20.0, 3.0), a, b);
+        assert!((d - ((10.0_f64).hypot(3.0))).abs() < 1e-9);
+        assert_eq!((c.x, c.y), (10.0, 0.0));
+    }
+
+    /// Perpendicular distance to the interior of the segment is the
+    /// y-offset for a horizontal segment.
+    #[test]
+    fn segment_distance_perpendicular_inside() {
+        let a = Point::new(0.0, 0.0);
+        let b = Point::new(10.0, 0.0);
+        let (d, c) = point_to_segment_distance(Point::new(4.0, 7.0), a, b);
+        assert_eq!(d, 7.0);
+        assert_eq!((c.x, c.y), (4.0, 0.0));
+    }
+
+    /// Degenerate segment (a == b) must still yield a sane distance
+    /// (radial from the shared point), not divide by zero.
+    #[test]
+    fn segment_distance_degenerate_handled() {
+        let p = Point::new(3.0, 4.0);
+        let (d, c) = point_to_segment_distance(p, Point::new(0.0, 0.0), Point::new(0.0, 0.0));
+        assert_eq!(d, 5.0);
+        assert_eq!((c.x, c.y), (0.0, 0.0));
+    }
+}
+
 impl Widget for SkyViewWidget {
     fn type_name(&self) -> &'static str {
         "SkyViewWidget"
@@ -340,6 +411,27 @@ impl Widget for SkyViewWidget {
             }
             Event::MouseMove { pos } => {
                 let Some(down) = self.down.as_mut() else {
+                    // Idle pointer: hit-test for hover so the user can
+                    // mouse over a constellation line and see its name
+                    // surface as an info card without clicking. Skip
+                    // when a drag is in progress — we don't want the
+                    // tooltip to flicker mid-pan.
+                    let next = self.hit_test_tap(*pos).map(|b| Selection {
+                        name: b.name,
+                        magnitude: b.magnitude,
+                        detail: b.detail,
+                        pos: b.pos,
+                    });
+                    let mut hovered = self.hovered.borrow_mut();
+                    let changed = match (&*hovered, &next) {
+                        (None, None) => false,
+                        (Some(a), Some(b)) => a.name != b.name,
+                        _ => true,
+                    };
+                    if changed {
+                        *hovered = next;
+                        agg_gui::animation::request_draw();
+                    }
                     return EventResult::Ignored;
                 };
                 let dx_total = pos.x - down.origin.x;
@@ -405,6 +497,7 @@ impl Widget for SkyViewWidget {
                             name: hit.name,
                             magnitude: hit.magnitude,
                             detail: hit.detail,
+                            pos: hit.pos,
                         });
                     } else {
                         self.selected = None;
@@ -620,20 +713,31 @@ impl Widget for SkyViewWidget {
         // below where their eye already is.
         hud::paint_centre_reticle(ctx, Arc::clone(&self.font), w, h, centre_alt, &painted);
 
-        // Selected-body info card. Drawn last so the panel sits above any
-        // overlapping stars / labels. We look the selection up in the
-        // freshly-painted set so the card moves with the body as the user
-        // pans, and disappears automatically if the body slid off-screen.
-        if let Some(sel) = self.selected.clone() {
-            if let Some(body) = painted.iter().find(|p| p.name == sel.name).cloned() {
-                hud::paint_info_card(
-                    ctx,
-                    Arc::clone(&self.font),
-                    body.pos,
-                    Rect::new(0.0, 0.0, w, h),
-                    &sel,
-                );
-            }
+        // Info card. Drawn last so the panel sits above any
+        // overlapping stars / labels. `selected` (clicked) takes
+        // priority over `hovered` so a sticky pick isn't preempted
+        // by the cursor drifting onto something else. We look the
+        // entry up in the freshly-painted body set so the card
+        // *follows* the body as the user pans; constellation hits
+        // don't live in `painted`, so they fall back to the stored
+        // hit position from the selection.
+        let card_target = self
+            .selected
+            .clone()
+            .or_else(|| self.hovered.borrow().clone());
+        if let Some(sel) = card_target {
+            let anchor = painted
+                .iter()
+                .find(|p| p.name == sel.name)
+                .map(|b| b.pos)
+                .unwrap_or(sel.pos);
+            hud::paint_info_card(
+                ctx,
+                Arc::clone(&self.font),
+                anchor,
+                Rect::new(0.0, 0.0, w, h),
+                &sel,
+            );
         }
 
         // Promote this frame's projections to the cache for the next tap.

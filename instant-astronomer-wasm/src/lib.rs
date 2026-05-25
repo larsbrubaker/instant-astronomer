@@ -499,6 +499,14 @@ pub fn on_device_orientation(alpha_deg: f64, beta_deg: f64, gamma_deg: f64) {
     let view = q_pitch * q_yaw;
     HANDLES.with(|h_cell| {
         if let Some(h) = h_cell.borrow().as_ref() {
+            // Honour the "Use compass" toggle — when off, the user
+            // drives the view via swipe/drag and stray device-
+            // orientation events from desktop browsers (or a
+            // mis-calibrated phone magnetometer) must not stomp the
+            // accumulated `view_quat`.
+            if !h.use_device_orientation.get() {
+                return;
+            }
             h.view_quat.set(view);
         }
     });

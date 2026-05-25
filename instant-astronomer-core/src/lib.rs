@@ -37,7 +37,10 @@ use agg_gui::widgets::{Button, Checkbox, Conditional, Container, FlexColumn, Fle
 use agg_gui::App;
 use nalgebra::UnitQuaternion;
 
-use crate::icons::{load_icon_font, FA_COMPASS, FA_CROSSHAIRS, FA_EXPAND};
+use crate::icons::{
+    load_icon_font, FA_CIRCLE_NODES, FA_COMPASS, FA_CROSSHAIRS, FA_EXPAND,
+    FA_MOBILE_SCREEN_BUTTON,
+};
 use crate::widgets::horizon_tape::HorizonTapeWidget;
 use crate::widgets::sky_view::SkyViewWidget;
 use crate::widgets::status_text::StatusText;
@@ -104,6 +107,11 @@ pub struct AstronomerHandles {
     /// additional rotation around the world up axis so the user can
     /// re-align "what my phone is pointing at" with the rendered north.
     pub calibration_yaw: Rc<Cell<f64>>,
+    /// Whether to honour device-orientation events. When `false`, the
+    /// WASM shell ignores `deviceorientation` callbacks and the user can
+    /// swipe to look around. Lets the user opt out when the
+    /// magnetometer is mis-calibrated or the phone is on a desk.
+    pub use_device_orientation: Rc<Cell<bool>>,
 }
 
 /// Build the shared Instant-Astronomer widget tree. Both the native and
@@ -126,6 +134,12 @@ pub fn build_astronomer_app<P: AstronomerPlatform>(
     // reveals the city search field. They never need to be on at the
     // same time — geolocation already gives the exact lat/lng.
     let use_geolocation = Rc::new(Cell::new(true));
+    // Honour device-orientation events on mobile (where there's a
+    // working compass + gyro), ignore them on desktop (browsers fire
+    // events with stale/zero values that would override mouse-drag
+    // pans). User can flip the toggle either way.
+    let use_device_orientation =
+        Rc::new(Cell::new(agg_gui::input_profile::is_mobile_touch()));
     let search_text = Rc::new(std::cell::RefCell::new(String::new()));
     let search_status = Rc::new(std::cell::RefCell::new(String::from("Type a city to search")));
 
@@ -135,6 +149,7 @@ pub fn build_astronomer_app<P: AstronomerPlatform>(
         timestamp_ms: Rc::clone(&timestamp_ms),
         view_quat: Rc::clone(&view_quat),
         calibration_yaw: Rc::clone(&calibration_yaw),
+        use_device_orientation: Rc::clone(&use_device_orientation),
     };
 
     let sky_widget = SkyViewWidget::new(
@@ -158,6 +173,7 @@ pub fn build_astronomer_app<P: AstronomerPlatform>(
         Rc::clone(&calibration_yaw),
         Rc::clone(&show_constellations),
         Rc::clone(&use_geolocation),
+        Rc::clone(&use_device_orientation),
         Rc::clone(&search_text),
         Rc::clone(&search_status),
     );
@@ -184,6 +200,7 @@ fn build_control_panel<P: AstronomerPlatform>(
     calibration_yaw: Rc<Cell<f64>>,
     show_constellations: Rc<Cell<bool>>,
     use_geolocation: Rc<Cell<bool>>,
+    use_device_orientation: Rc<Cell<bool>>,
     search_text: Rc<std::cell::RefCell<String>>,
     search_status: Rc<std::cell::RefCell<String>>,
 ) -> Container {
@@ -227,12 +244,61 @@ fn build_control_panel<P: AstronomerPlatform>(
             })
     };
 
-    let constellation_checkbox = Checkbox::new(
-        "Constellations",
-        Arc::clone(&font),
-        show_constellations.get(),
-    )
-    .with_state_cell(Rc::clone(&show_constellations));
+    // Constellation overlay toggle. Mobile uses an icon-only Button
+    // with `with_active_fn` so the row stays compact; desktop keeps
+    // the labelled Checkbox for clarity. Both write to the same
+    // `show_constellations` cell so the rest of the app doesn't care
+    // which variant rendered the toggle.
+    let constellation_toggle: Box<dyn agg_gui::widget::Widget> = if mobile {
+        let click_cell = Rc::clone(&show_constellations);
+        let active_cell = Rc::clone(&show_constellations);
+        Box::new(
+            Button::new("", Arc::clone(&font))
+                .with_icon(FA_CIRCLE_NODES, Arc::clone(&icon_font))
+                .with_active_fn(move || active_cell.get())
+                .on_click(move || {
+                    click_cell.set(!click_cell.get());
+                    agg_gui::animation::request_draw();
+                }),
+        )
+    } else {
+        Box::new(
+            Checkbox::new(
+                "Constellations",
+                Arc::clone(&font),
+                show_constellations.get(),
+            )
+            .with_state_cell(Rc::clone(&show_constellations)),
+        )
+    };
+
+    // "Use compass / accel" toggle. When OFF, the WASM shell stops
+    // forwarding `deviceorientation` events into `view_quat`, freeing
+    // the user to swipe-pan instead — handy when the magnetometer is
+    // mis-calibrated or the phone is sitting flat on a desk. Same
+    // mobile-icon / desktop-checkbox split as Constellations.
+    let compass_toggle: Box<dyn agg_gui::widget::Widget> = if mobile {
+        let click_cell = Rc::clone(&use_device_orientation);
+        let active_cell = Rc::clone(&use_device_orientation);
+        Box::new(
+            Button::new("", Arc::clone(&font))
+                .with_icon(FA_MOBILE_SCREEN_BUTTON, Arc::clone(&icon_font))
+                .with_active_fn(move || active_cell.get())
+                .on_click(move || {
+                    click_cell.set(!click_cell.get());
+                    agg_gui::animation::request_draw();
+                }),
+        )
+    } else {
+        Box::new(
+            Checkbox::new(
+                "Use compass",
+                Arc::clone(&font),
+                use_device_orientation.get(),
+            )
+            .with_state_cell(Rc::clone(&use_device_orientation)),
+        )
+    };
 
     // Calibrate-to-north button: snapshots the current compass heading
     // derived from `view_quat` into `calibration_yaw`. The projection
@@ -296,7 +362,8 @@ fn build_control_panel<P: AstronomerPlatform>(
         .add(Box::new(geo_checkbox))
         .add(Box::new(geo_button))
         .add(Box::new(calibrate_button))
-        .add(Box::new(constellation_checkbox))
+        .add(constellation_toggle)
+        .add(compass_toggle)
         .add(Box::new(fullscreen_button))
         .add(Box::new(coord_label))
         .add(Box::new(time_label));

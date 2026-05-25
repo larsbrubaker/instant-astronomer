@@ -29,3 +29,13 @@ pub const FA_EXPAND: char = '\u{f065}';
 
 /// Compress arrows pointing inward — used when already full-screen.
 pub const FA_COMPRESS: char = '\u{f066}';
+
+/// Circle of connected nodes — used for the Constellations toggle on
+/// mobile (visually a star-figure / asterism).
+pub const FA_CIRCLE_NODES: char = '\u{e4e2}';
+
+/// Mobile phone screen with a centre dot — used for the
+/// "use compass / accelerometer" toggle. Hints at "phone sensors drive
+/// the view"; tap to disable when the magnetometer is mis-calibrated
+/// and let mouse / touch swipe take over.
+pub const FA_MOBILE_SCREEN_BUTTON: char = '\u{f3cd}';
