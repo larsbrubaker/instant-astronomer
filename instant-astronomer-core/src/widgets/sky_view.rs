@@ -13,6 +13,8 @@
 //! pins an info card on it — the core "what's that bright thing on the
 //! horizon?" lookup the app was built for.
 
+mod hud;
+
 use crate::math::{
     device_orientation_matrix, equatorial_to_horizontal, horizontal_to_cartesian,
     HorizontalCoords, LowPassFilter,
@@ -46,23 +48,23 @@ const TAP_HIT_RADIUS: f64 = 28.0;
 /// test can run in O(n) against actual on-screen geometry instead of
 /// re-running the full projection pipeline.
 #[derive(Debug, Clone)]
-struct PaintedBody {
-    name: String,
-    pos: Point,
+pub(crate) struct PaintedBody {
+    pub name: String,
+    pub pos: Point,
     /// Apparent visual magnitude. Smaller = brighter; planets / bright
     /// stars get priority when two bodies sit close together.
-    magnitude: f32,
+    pub magnitude: f32,
     /// Optional extra description shown in the info card.
-    detail: Option<String>,
+    pub detail: Option<String>,
 }
 
 /// Information about the currently selected (tapped) body, painted as an
 /// info card on top of the sky.
 #[derive(Debug, Clone)]
-struct Selection {
-    name: String,
-    magnitude: f32,
-    detail: Option<String>,
+pub(crate) struct Selection {
+    pub name: String,
+    pub magnitude: f32,
+    pub detail: Option<String>,
 }
 
 /// Sky viewport widget — paints stars, constellations, and Solar System
@@ -493,7 +495,22 @@ impl Widget for SkyViewWidget {
         // labels (N / NE / E / …) slide along the strip based on the
         // user's current heading, matching the actual real-world
         // direction each label points at on the celestial sphere.
-        Self::paint_horizon_strip(ctx, Arc::clone(&self.font), w, h, &rot, center, focal_length);
+        hud::paint_horizon_strip(ctx, Arc::clone(&self.font), w, h, &rot, center, focal_length);
+
+        // Altitude ladder along the right edge — like an HUD pitch
+        // tape — so the user can see at a glance how far above (or
+        // below) the horizon the centre of the screen is pointing.
+        // Particularly important now that the horizon is locked level
+        // at the bottom of the screen.
+        let centre_alt = hud::screen_centre_altitude(&rot);
+        hud::paint_altitude_ladder(ctx, Arc::clone(&self.font), w, h, centre_alt);
+
+        // Centre reticle + nearest-body identifier — a tiny crosshair
+        // marks the screen centre, and the name of whatever celestial
+        // body is closest to it is printed just above. The user can
+        // simply "aim" the centre at the bright thing they're curious
+        // about and read the name without tapping.
+        hud::paint_centre_reticle(ctx, Arc::clone(&self.font), w, h, centre_alt, &painted);
 
         // Selected-body info card. Drawn last so the panel sits above any
         // overlapping stars / labels. We look the selection up in the
@@ -501,7 +518,7 @@ impl Widget for SkyViewWidget {
         // pans, and disappears automatically if the body slid off-screen.
         if let Some(sel) = self.selected.clone() {
             if let Some(body) = painted.iter().find(|p| p.name == sel.name).cloned() {
-                Self::paint_info_card(
+                hud::paint_info_card(
                     ctx,
                     Arc::clone(&self.font),
                     body.pos,
@@ -516,223 +533,3 @@ impl Widget for SkyViewWidget {
     }
 }
 
-impl SkyViewWidget {
-    /// Paint a horizontal horizon line at the bottom of the sky view
-    /// with a faint "ground" band below it and cardinal direction
-    /// labels (N / NE / E / …) sliding along its top edge.
-    ///
-    /// The line itself sits at a fixed Y so the user always has a
-    /// stable bottom-of-screen reference — a screen orientation
-    /// you can trust no matter how the phone is rotated. Cardinal
-    /// labels use the *current* projection of each compass direction
-    /// on the celestial sphere to pick their X position, so as the
-    /// user pans the sky the labels slide accordingly.
-    fn paint_horizon_strip(
-        ctx: &mut dyn DrawCtx,
-        font: Arc<Font>,
-        w: f64,
-        _h: f64,
-        rot: &nalgebra::Matrix3<f64>,
-        center: Point,
-        focal_length: f64,
-    ) {
-        // Bottom band reserved for the ground + horizon line. Tuned so
-        // it doesn't eat too much sky on small phones but is still big
-        // enough for a readable label row.
-        let ground_h = 36.0_f64;
-        let horizon_y = ground_h; // top edge of the ground band (Y-up)
-
-        // Ground fill: subtle dark band so the eye knows "this isn't sky".
-        ctx.set_fill_color(Color::from_rgba8(4, 4, 10, 220));
-        ctx.begin_path();
-        ctx.rect(0.0, 0.0, w, ground_h);
-        ctx.fill();
-
-        // Soft horizon glow just above the line — lifts the line off
-        // the deep-indigo sky so it reads as the horizon, not just a
-        // UI divider.
-        for i in 0..6 {
-            let alpha = 18 - i * 3;
-            let yy = horizon_y + i as f64;
-            ctx.set_stroke_color(Color::from_rgba8(120, 100, 80, alpha.max(0) as u8));
-            ctx.set_line_width(1.0);
-            ctx.begin_path();
-            ctx.move_to(0.0, yy);
-            ctx.line_to(w, yy);
-            ctx.stroke();
-        }
-
-        // The horizon line itself — warm tone, clearly visible against
-        // the indigo sky.
-        ctx.set_stroke_color(Color::from_rgba8(255, 180, 120, 200));
-        ctx.set_line_width(1.2);
-        ctx.begin_path();
-        ctx.move_to(0.0, horizon_y);
-        ctx.line_to(w, horizon_y);
-        ctx.stroke();
-
-        // Cardinal labels: compute the projected X for each direction
-        // on the alt=0 ring and pin the label at that X with Y = on
-        // the horizon line. Skip labels whose projected direction is
-        // behind the camera (depth <= 0).
-        let directions: [(&str, f64); 8] = [
-            ("N", 0.0),
-            ("NE", PI / 4.0),
-            ("E", PI / 2.0),
-            ("SE", 3.0 * PI / 4.0),
-            ("S", PI),
-            ("SW", 5.0 * PI / 4.0),
-            ("W", 3.0 * PI / 2.0),
-            ("NW", 7.0 * PI / 4.0),
-        ];
-
-        ctx.set_font(font);
-        for (name, az) in directions {
-            let hc = HorizontalCoords { alt: 0.0, az };
-            let v_cart = horizontal_to_cartesian(hc);
-            let v_rot = rot * v_cart;
-            let (x, _, z) = (v_rot.x, v_rot.y, v_rot.z);
-            if z <= 0.05 {
-                continue;
-            }
-            let projected_x = center.x + (x / z) * focal_length;
-            if projected_x < -20.0 || projected_x > w + 20.0 {
-                continue;
-            }
-
-            // Tick mark straddling the horizon line.
-            ctx.set_stroke_color(Color::from_rgba8(255, 200, 140, 220));
-            ctx.set_line_width(if name.len() == 1 { 1.6 } else { 1.0 });
-            ctx.begin_path();
-            ctx.move_to(projected_x, horizon_y - 6.0);
-            ctx.line_to(projected_x, horizon_y + 6.0);
-            ctx.stroke();
-
-            // Cardinal label below the line. Bigger / brighter for the
-            // four cardinals (N, E, S, W); smaller / dimmer for the
-            // inter-cardinals.
-            let is_cardinal = name.len() == 1;
-            let label_size = if is_cardinal { 13.0 } else { 10.0 };
-            let label_color = if is_cardinal {
-                if name == "N" {
-                    Color::from_rgb8(255, 110, 110) // red for North
-                } else {
-                    Color::from_rgb8(255, 220, 160)
-                }
-            } else {
-                Color::from_rgba8(255, 200, 150, 180)
-            };
-            let approx_w = name.chars().count() as f64 * label_size * 0.6;
-            ctx.set_fill_color(label_color);
-            ctx.set_font_size(label_size);
-            ctx.fill_text(name, projected_x - approx_w / 2.0, 6.0);
-        }
-    }
-
-    /// Paint a small info card anchored near `target`. Card stays inside the
-    /// `viewport` rect — flips to the other side of the body if it would
-    /// otherwise clip the right / top edges.
-    fn paint_info_card(
-        ctx: &mut dyn DrawCtx,
-        font: Arc<Font>,
-        target: Point,
-        viewport: Rect,
-        sel: &Selection,
-    ) {
-        let mut lines: Vec<String> = Vec::with_capacity(3);
-        lines.push(sel.name.clone());
-        lines.push(format!("magnitude {:+.2}", sel.magnitude));
-        if let Some(detail) = &sel.detail {
-            lines.push(detail.clone());
-        }
-
-        let title_size = 14.0_f64;
-        let body_size = 11.0_f64;
-        let pad = 10.0_f64;
-        let line_gap = 4.0_f64;
-
-        // Approximate widths from glyph counts — agg-gui's `measure_text`
-        // needs a font to be set first; we keep it cheap and consistent.
-        let approx_width = |text: &str, size: f64| (text.chars().count() as f64) * size * 0.55;
-        let mut card_w = lines
-            .iter()
-            .enumerate()
-            .map(|(i, l)| approx_width(l, if i == 0 { title_size } else { body_size }))
-            .fold(0.0_f64, f64::max)
-            + pad * 2.0;
-        card_w = card_w.clamp(160.0, viewport.width - 24.0);
-        let card_h = title_size
-            + (lines.len() - 1) as f64 * (body_size + line_gap)
-            + line_gap
-            + pad * 2.0;
-
-        // Anchor card to the upper-right of the tapped body by default.
-        let anchor_dx = 14.0_f64;
-        let anchor_dy = 14.0_f64;
-        let mut x = target.x + anchor_dx;
-        let mut y = target.y + anchor_dy;
-        if x + card_w > viewport.width - 8.0 {
-            x = target.x - card_w - anchor_dx;
-        }
-        if y + card_h > viewport.height - 8.0 {
-            y = target.y - card_h - anchor_dy;
-        }
-        x = x.clamp(8.0, viewport.width - card_w - 8.0);
-        y = y.clamp(8.0, viewport.height - card_h - 8.0);
-
-        // Backdrop + border.
-        ctx.set_fill_color(Color::from_rgba8(15, 20, 38, 230));
-        ctx.begin_path();
-        ctx.rounded_rect(x, y, card_w, card_h, 8.0);
-        ctx.fill();
-        ctx.set_stroke_color(Color::from_rgba8(255, 215, 90, 200));
-        ctx.set_line_width(1.5);
-        ctx.begin_path();
-        ctx.rounded_rect(x, y, card_w, card_h, 8.0);
-        ctx.stroke();
-
-        // Pointer line from card to the tapped body.
-        ctx.set_stroke_color(Color::from_rgba8(255, 215, 90, 180));
-        ctx.set_line_width(1.0);
-        ctx.begin_path();
-        ctx.move_to(target.x, target.y);
-        // Snap pointer to nearest card edge midpoint.
-        let cx = x + card_w / 2.0;
-        let cy = y + card_h / 2.0;
-        let edge_x = if target.x < x {
-            x
-        } else if target.x > x + card_w {
-            x + card_w
-        } else {
-            cx
-        };
-        let edge_y = if target.y < y {
-            y
-        } else if target.y > y + card_h {
-            y + card_h
-        } else {
-            cy
-        };
-        ctx.line_to(edge_x, edge_y);
-        ctx.stroke();
-
-        // Text. Y-up: top of card has the higher y; lines are stacked
-        // downward → decreasing y. fill_text places the baseline so add a
-        // small offset above the baseline for visual centering.
-        ctx.set_font(font);
-        let title_baseline = y + card_h - pad - title_size * 0.85;
-        ctx.set_fill_color(Color::from_rgb8(255, 235, 150));
-        ctx.set_font_size(title_size);
-        ctx.fill_text(&lines[0], x + pad, title_baseline);
-
-        ctx.set_fill_color(Color::from_rgb8(220, 222, 240));
-        ctx.set_font_size(body_size);
-        for (i, line) in lines.iter().enumerate().skip(1) {
-            let baseline = title_baseline
-                - title_size * 0.15
-                - line_gap
-                - i as f64 * (body_size + line_gap);
-            ctx.fill_text(line, x + pad, baseline);
-        }
-    }
-}
