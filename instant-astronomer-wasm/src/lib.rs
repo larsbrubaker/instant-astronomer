@@ -402,6 +402,33 @@ pub fn on_mouse_up(x: f64, y: f64, button: u8, shift: bool, ctrl: bool, alt: boo
 ///   clockwise yaw the rotation matrix expects.
 /// - On Android Chrome with `deviceorientationabsolute`, pass `event.alpha`
 ///   directly.
+/// Hand the JS-side platform name + `(pointer: coarse)` detection result
+/// to agg-gui so:
+///
+/// - shortcut labels (Cmd vs. Ctrl) match the user's actual OS,
+/// - the agg-gui on-screen keyboard auto-enables on mobile touch devices
+///   (instead of the awful native browser keyboard).
+///
+/// Idempotent — call again if the host wants to refresh after viewport
+/// rotation / window resize.
+#[wasm_bindgen]
+pub fn set_client_platform(name: &str, pointer_coarse: bool) {
+    agg_gui::set_platform(agg_gui::platform_from_name(name));
+    let profile = agg_gui::input_profile::input_profile_from_hint(name, pointer_coarse);
+    agg_gui::input_profile::set_input_profile(profile);
+    agg_gui::widgets::on_screen_keyboard::set_enabled(profile.is_mobile_touch());
+    mark_dirty();
+}
+
+/// `true` while the agg-gui on-screen keyboard panel is visible. The JS
+/// shell uses this to suppress any of its own native-keyboard
+/// workarounds (we don't have one yet for instant-astronomer, but the
+/// export is kept for parity with agg-gui's `demo-wasm`).
+#[wasm_bindgen]
+pub fn software_keyboard_visible() -> bool {
+    agg_gui::widgets::on_screen_keyboard::is_visible()
+}
+
 #[wasm_bindgen]
 pub fn on_device_orientation(alpha_deg: f64, beta_deg: f64, gamma_deg: f64) {
     HANDLES.with(|h_cell| {

@@ -37,6 +37,8 @@ type WasmModule = {
   on_device_orientation: (alpha: number, beta: number, gamma: number) => void;
   set_location_degrees: (latitudeDeg: number, longitudeDeg: number) => void;
   set_timestamp_ms: (timestampMs: number) => void;
+  set_client_platform: (name: string, pointerCoarse: boolean) => void;
+  software_keyboard_visible: () => boolean;
 };
 
 // iOS DeviceOrientationEvent requires `requestPermission()` — typed as an
@@ -215,8 +217,30 @@ function requestGeolocation(wasm: WasmModule): void {
   );
 }
 
+function detectClientPlatform(): string {
+  const nav = navigator as Navigator & { userAgentData?: { platform?: string } };
+  return (
+    nav.userAgentData?.platform ||
+    navigator.userAgent ||
+    navigator.platform ||
+    "other"
+  );
+}
+
+function detectPointerCoarse(): boolean {
+  // True on touch-primary devices (phones, tablets, iPad-mode Safari)
+  // and the trigger for the agg-gui on-screen keyboard taking over from
+  // the native iOS / Android keyboard.
+  return typeof window.matchMedia === "function"
+    ? window.matchMedia("(pointer: coarse)").matches
+    : false;
+}
+
 async function boot(): Promise<void> {
   const wasm = await loadWasm();
+  // Tell agg-gui about the device before we paint a frame so any text
+  // input the user touches immediately gets the right keyboard.
+  wasm.set_client_platform(detectClientPlatform(), detectPointerCoarse());
   wirePointerInput(wasm);
   requestGeolocation(wasm);
 
