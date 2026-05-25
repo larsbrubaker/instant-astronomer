@@ -388,15 +388,14 @@ impl Widget for SkyViewWidget {
             }
         }
 
-        // Stars. Cull anything below the real-world horizon so the
-        // ground band at the bottom of the screen reads as actual
-        // ground — no stars peeking out from below.
+        // Stars. Painted regardless of altitude so the user can pan
+        // / tilt down past the horizon and still see the constellations
+        // hiding "behind the Earth" — matches Stellarium-style behaviour.
+        // The painted alt=0 line + ground strip remain the visual
+        // reference for which half is sky and which is ground.
         ctx.set_font(Arc::clone(&self.font));
         for star in all_stars() {
             let horiz = equatorial_to_horizontal(star.coords, lat, lst);
-            if horiz.alt < 0.0 {
-                continue;
-            }
             let Some(pos) = self.project_horizontal(horiz, &rot, center, focal_length) else {
                 continue;
             };
@@ -440,14 +439,12 @@ impl Widget for SkyViewWidget {
         // Solar System bodies. Render brighter / larger discs for the body
         // sizes the user cares about (Sun, Moon big; Venus + Jupiter
         // notably brighter than fixed stars; the others sit between).
-        // Same below-horizon cull as for stars — the Sun and planets
-        // can plausibly be below the horizon, and we don't want them
-        // floating above the ground band.
+        // No below-horizon cull — the Sun at midnight is genuinely useful
+        // to find ("where is the Sun right now?") and panning down to see
+        // a planet that just set should still resolve it. Behind-camera
+        // (z<=0.05) is the only thing project_horizontal skips.
         for body in calculate_solar_system_bodies(self.timestamp_ms.get()) {
             let horiz = equatorial_to_horizontal(body.coords, lat, lst);
-            if horiz.alt < 0.0 {
-                continue;
-            }
             let Some(pos) = self.project_horizontal(horiz, &rot, center, focal_length) else {
                 continue;
             };
