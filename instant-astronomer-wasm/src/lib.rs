@@ -11,7 +11,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use agg_gui::{App, Modifiers, MouseButton};
+use agg_gui::{App, Modifiers, MouseButton, Size};
 use demo_wgpu::{begin_frame, WgpuGfxCtx};
 use instant_astronomer_core::{
     build_astronomer_app, load_default_font, AstronomerHandles, AstronomerPlatform,
@@ -43,46 +43,54 @@ struct WasmPlatform {
 
 impl AstronomerPlatform for WasmPlatform {
     fn request_geolocation(&self) {
-        let window = match web_sys::window() {
-            Some(w) => w,
-            None => return,
+        let Some(window) = web_sys::window() else {
+            return;
         };
-        let navigator = window.navigator();
-        let geolocation = match navigator.geolocation() {
-            Ok(g) => g,
-            Err(_) => return,
+        // Convert latitude / longitude in **radians** internally — coords()
+        // hands us degrees, so convert at the boundary.
+        let Ok(geolocation) = window.navigator().geolocation() else {
+            web_sys::console::error_1(&JsValue::from_str(
+                "navigator.geolocation unavailable (insecure context?)",
+            ));
+            return;
         };
 
-        let lat_clone = Rc::clone(&self.latitude);
-        let lng_clone = Rc::clone(&self.longitude);
+        let lat_cell = Rc::clone(&self.latitude);
+        let lng_cell = Rc::clone(&self.longitude);
 
-        let success_callback = wasm_bindgen::closure::Closure::wrap(Box::new(move |pos: web_sys::Position| {
-            let coords = pos.coords();
-            lat_clone.set(coords.latitude());
-            lng_clone.set(coords.longitude());
-            web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&format!(
-                "WASM Geolocation Success: Latitude {}, Longitude {}",
-                coords.latitude(), coords.longitude()
-            )));
-            agg_gui::animation::request_draw();
-            mark_dirty();
-        }) as Box<dyn FnMut(web_sys::Position)>);
+        let success: wasm_bindgen::closure::Closure<dyn FnMut(web_sys::Position)> =
+            wasm_bindgen::closure::Closure::new(move |pos: web_sys::Position| {
+                let coords = pos.coords();
+                // State cells store degrees (user-facing); math boundary
+                // converts to radians.
+                lat_cell.set(coords.latitude());
+                lng_cell.set(coords.longitude());
+                web_sys::console::log_1(&JsValue::from_str(&format!(
+                    "geolocation: lat {} lng {}",
+                    coords.latitude(),
+                    coords.longitude()
+                )));
+                agg_gui::animation::request_draw();
+                mark_dirty();
+            });
 
-        let error_callback = wasm_bindgen::closure::Closure::wrap(Box::new(move |err: web_sys::PositionError| {
-            web_sys::console::error_1(&wasm_bindgen::JsValue::from_str(&format!(
-                "WASM Geolocation Error (code {}): {}",
-                err.code(), err.message()
-            )));
-        }) as Box<dyn FnMut(web_sys::PositionError)>);
+        let error: wasm_bindgen::closure::Closure<dyn FnMut(web_sys::PositionError)> =
+            wasm_bindgen::closure::Closure::new(move |err: web_sys::PositionError| {
+                web_sys::console::error_1(&JsValue::from_str(&format!(
+                    "geolocation error code={} message={}",
+                    err.code(),
+                    err.message()
+                )));
+            });
 
         let _ = geolocation.get_current_position_with_error_callback(
-            success_callback.as_ref().unchecked_ref(),
-            Some(error_callback.as_ref().unchecked_ref()),
+            success.as_ref().unchecked_ref(),
+            Some(error.as_ref().unchecked_ref()),
         );
 
-        // Keep callbacks alive (leak to let browser invoke them whenever it finishes)
-        success_callback.forget();
-        error_callback.forget();
+        // Leak to let the browser invoke whichever callback fires.
+        success.forget();
+        error.forget();
     }
 }
 
@@ -139,7 +147,7 @@ async fn init_wgpu_async() -> Result<WgpuInit, String> {
             force_fallback_adapter: false,
         })
         .await
-        .ok_or_else(|| "request_adapter failed".to_string())?;
+        .map_err(|err| format!("request_adapter: {err:?}"))?;
 
     let adapter_limits = adapter.limits();
     let (device, queue) = adapter
@@ -283,12 +291,10 @@ pub fn draw_frame() -> bool {
 
     let frame = WGPU_INIT.with(|init_cell| {
         let init = init_cell.borrow();
-        let Some(init) = init.as_ref() else {
-            return None;
-        };
+        let init = init.as_ref()?;
         match init.surface.get_current_texture() {
-            Ok(wgpu::CurrentSurfaceTexture::Success(f)) => Some(f),
-            Ok(wgpu::CurrentSurfaceTexture::Suboptimal(f)) => Some(f),
+            wgpu::CurrentSurfaceTexture::Success(f)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(f) => Some(f),
             _ => None,
         }
     });

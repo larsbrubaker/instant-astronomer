@@ -1,30 +1,33 @@
-//! # Horizon Tape / Orientation HUD Strip
+//! # Horizon Tape (Compass HUD)
 //!
-//! This widget implements a rolling cardinal horizon tape synchronized directly
-//! with the device's magnetometer/compass (smooth yaw value). It displays compass
-//! tick marks and cardinal direction labels (N, NE, E, SE, S, SW, W, NW) sliding
-//! responsively across a horizontal HUD strip.
+//! Rolling cardinal-direction strip rendered directly above the control
+//! panel. The tape's position is driven by the smoothed device yaw, so as
+//! the user pans (mouse drag) or rotates the phone, the cardinal labels
+//! slide past a fixed centre indicator. Section 2 of `implementation.md`
+//! calls this out as the "HUD Horizon Tape" between the sky viewport and
+//! the configuration tray.
+//!
+//! All rendering uses agg-gui's [`DrawCtx`] — no canvas / WebGL paths.
 
 use agg_gui::color::Color;
 use agg_gui::draw_ctx::DrawCtx;
-use agg_gui::geometry::{Rect, Size};
-use agg_gui::text::Font;
 use agg_gui::event::{Event, EventResult};
+use agg_gui::geometry::{Point, Rect, Size};
+use agg_gui::text::Font;
 use agg_gui::widget::Widget;
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-/// Widget displaying a rolling compass tape HUD.
+/// Horizontal compass strip widget driven by a shared yaw cell (radians).
 pub struct HorizonTapeWidget {
     bounds: Rect,
     children: Vec<Box<dyn Widget>>,
     font: Arc<Font>,
-    yaw: Rc<Cell<f64>>, // Smoothed device yaw angle in radians (0 = North, PI/2 = East, etc.)
+    yaw: Rc<Cell<f64>>,
 }
 
 impl HorizonTapeWidget {
-    /// Create a new rolling horizon tape HUD widget.
     pub fn new(font: Arc<Font>, yaw: Rc<Cell<f64>>) -> Self {
         Self {
             bounds: Rect::default(),
@@ -33,7 +36,25 @@ impl HorizonTapeWidget {
             yaw,
         }
     }
+
+    fn fill_rect(ctx: &mut dyn DrawCtx, r: Rect, color: Color) {
+        ctx.set_fill_color(color);
+        ctx.begin_path();
+        ctx.rect(r.x, r.y, r.width, r.height);
+        ctx.fill();
+    }
+
+    fn stroke_segment(ctx: &mut dyn DrawCtx, a: Point, b: Point, width: f64, color: Color) {
+        ctx.set_stroke_color(color);
+        ctx.set_line_width(width);
+        ctx.begin_path();
+        ctx.move_to(a.x, a.y);
+        ctx.line_to(b.x, b.y);
+        ctx.stroke();
+    }
 }
+
+const TAPE_HEIGHT: f64 = 28.0;
 
 impl Widget for HorizonTapeWidget {
     fn type_name(&self) -> &'static str {
@@ -48,10 +69,6 @@ impl Widget for HorizonTapeWidget {
         self.bounds = bounds;
     }
 
-    fn on_event(&mut self, _event: &Event) -> EventResult {
-        EventResult::Ignored
-    }
-
     fn children(&self) -> &[Box<dyn Widget>] {
         &self.children
     }
@@ -61,10 +78,12 @@ impl Widget for HorizonTapeWidget {
     }
 
     fn layout(&mut self, available: Size) -> Size {
-        // Horizon tape has a fixed height, say 28.0 pixels, but stretches horizontally
-        let height = 28.0;
-        self.bounds = Rect::new(0.0, 0.0, available.width, height);
-        Size::new(available.width, height)
+        self.bounds = Rect::new(0.0, 0.0, available.width, TAPE_HEIGHT);
+        Size::new(available.width, TAPE_HEIGHT)
+    }
+
+    fn on_event(&mut self, _event: &Event) -> EventResult {
+        EventResult::Ignored
     }
 
     fn paint(&mut self, ctx: &mut dyn DrawCtx) {
@@ -72,163 +91,75 @@ impl Widget for HorizonTapeWidget {
         let w = b.width;
         let h = b.height;
 
-        // Draw a dark semi-transparent background for the tape
-        let bg_color = Color::from_rgba8(20, 20, 30, 200);
-        ctx.begin_path();
-        ctx.rect(0.0, 0.0, w, h);
-        ctx.set_fill_color(bg_color);
-        ctx.fill();
+        // Background bar.
+        Self::fill_rect(ctx, Rect::new(0.0, 0.0, w, h), Color::from_rgba8(20, 20, 30, 200));
 
-        // Draw top and bottom borders
-        let border_color = Color::from_rgba8(255, 255, 255, 40);
-        ctx.begin_path();
-        ctx.move_to(0.0, h);
-        ctx.line_to(w, h);
-        ctx.set_stroke_color(border_color);
-        ctx.set_line_width(1.0);
-        ctx.stroke();
+        let border = Color::from_rgba8(255, 255, 255, 40);
+        Self::stroke_segment(ctx, Point::new(0.0, h), Point::new(w, h), 1.0, border);
+        Self::stroke_segment(ctx, Point::new(0.0, 0.0), Point::new(w, 0.0), 1.0, border);
 
-        ctx.begin_path();
-        ctx.move_to(0.0, 0.0);
-        ctx.line_to(w, 0.0);
-        ctx.set_stroke_color(border_color);
-        ctx.set_line_width(1.0);
-        ctx.stroke();
+        // Centre indicator (Y-up: the "top" of the bar is `h`).
+        let cx = w / 2.0;
+        let indicator = Color::from_rgb8(255, 100, 100);
+        Self::stroke_segment(ctx, Point::new(cx, h), Point::new(cx, h - 6.0), 2.0, indicator);
+        Self::stroke_segment(ctx, Point::new(cx, 0.0), Point::new(cx, 6.0), 2.0, indicator);
 
-        // Draw a center indicator pointer (little red tick pointing down/up)
-        let center_x = w / 2.0;
-        let indicator_color = Color::from_rgb8(255, 100, 100);
-        ctx.begin_path();
-        ctx.move_to(center_x, h);
-        ctx.line_to(center_x, h - 6.0);
-        ctx.set_stroke_color(indicator_color);
-        ctx.set_line_width(2.0);
-        ctx.stroke();
-
-        ctx.begin_path();
-        ctx.move_to(center_x, 0.0);
-        ctx.line_to(center_x, 6.0);
-        ctx.set_stroke_color(indicator_color);
-        ctx.set_line_width(2.0);
-        ctx.stroke();
-
-        // Yaw angle in degrees: 0 to 360
+        // Compass marks: 4 px per degree, ±half-screen.
         let yaw_deg = self.yaw.get().to_degrees();
-
-        // 1 degree = N pixels on screen. Let's say 4 pixels per degree.
-        let pixels_per_degree = 4.0;
-
-        // Draw compass marks from yaw_deg - visible_half to yaw_deg + visible_half
-        let half_visible_deg = (center_x / pixels_per_degree) as i32;
-
+        let pixels_per_degree = 4.0_f64;
+        let half_visible_deg = (cx / pixels_per_degree) as i32;
         let start_deg = (yaw_deg as i32 - half_visible_deg - 5).max(-360);
         let end_deg = (yaw_deg as i32 + half_visible_deg + 5).min(720);
 
         ctx.set_font(Arc::clone(&self.font));
 
         for deg in start_deg..=end_deg {
-            // Normalized degree to 0..360 range
-            let norm_deg = (deg % 360 + 360) % 360;
-
-            // Offset of this degree from the current yaw center
+            let norm_deg = ((deg % 360) + 360) % 360;
             let deg_diff = deg as f64 - yaw_deg;
-            let tick_x = center_x + deg_diff * pixels_per_degree;
+            let tick_x = cx + deg_diff * pixels_per_degree;
+            if tick_x < 0.0 || tick_x > w {
+                continue;
+            }
 
-            // Only draw if inside tape boundaries
-            if tick_x >= 0.0 && tick_x <= w {
-                let is_major = norm_deg % 30 == 0;
-                let is_cardinal = norm_deg % 45 == 0;
+            let is_cardinal = norm_deg % 45 == 0;
+            let is_major = norm_deg % 30 == 0;
+            let tick_color = Color::from_rgba8(255, 255, 255, 150);
 
-                let line_color = Color::from_rgba8(255, 255, 255, 150);
-
-                if is_cardinal {
-                    // Draw a strong major tick
-                    ctx.begin_path();
-                    ctx.move_to(tick_x, 0.0);
-                    ctx.line_to(tick_x, 10.0);
-                    ctx.set_stroke_color(line_color);
-                    ctx.set_line_width(1.5);
-                    ctx.stroke();
-
-                    ctx.begin_path();
-                    ctx.move_to(tick_x, h);
-                    ctx.line_to(tick_x, h - 10.0);
-                    ctx.set_stroke_color(line_color);
-                    ctx.set_line_width(1.5);
-                    ctx.stroke();
-
-                    // Get cardinal label
-                    let label = match norm_deg {
-                        0 => "N",
-                        45 => "NE",
-                        90 => "E",
-                        135 => "SE",
-                        180 => "S",
-                        225 => "SW",
-                        270 => "W",
-                        315 => "NW",
-                        _ => "",
-                    };
-
-                    ctx.set_font_size(11.0);
-                    let label_color = if norm_deg == 0 {
-                        Color::from_rgb8(255, 100, 100) // Red for North!
-                    } else {
-                        Color::from_rgb8(220, 220, 220)
-                    };
-
-                    // Draw the text in the middle of the tape
-                    let text_width = label.len() as f64 * 7.0; // simple estimation
-                    ctx.set_fill_color(label_color);
-                    ctx.fill_text(
-                        label,
-                        tick_x - text_width / 2.0,
-                        h / 2.0 - 4.0
-                    );
-                } else if is_major {
-                    // Draw medium tick
-                    ctx.begin_path();
-                    ctx.move_to(tick_x, 0.0);
-                    ctx.line_to(tick_x, 6.0);
-                    ctx.set_stroke_color(line_color);
-                    ctx.set_line_width(1.0);
-                    ctx.stroke();
-
-                    ctx.begin_path();
-                    ctx.move_to(tick_x, h);
-                    ctx.line_to(tick_x, h - 6.0);
-                    ctx.set_stroke_color(line_color);
-                    ctx.set_line_width(1.0);
-                    ctx.stroke();
-
-                    // Draw numerical degree label (e.g. 30, 60, 120, etc.)
-                    let deg_str = format!("{}", norm_deg);
-                    ctx.set_font_size(8.0);
-                    let label_color = Color::from_rgba8(255, 255, 255, 100);
-                    let text_width = deg_str.len() as f64 * 5.0;
-                    ctx.set_fill_color(label_color);
-                    ctx.fill_text(
-                        &deg_str,
-                        tick_x - text_width / 2.0,
-                        h / 2.0 - 3.0
-                    );
-                } else if norm_deg % 5 == 0 {
-                    // Draw minor tick
-                    let minor_color = Color::from_rgba8(255, 255, 255, 60);
-                    ctx.begin_path();
-                    ctx.move_to(tick_x, 0.0);
-                    ctx.line_to(tick_x, 4.0);
-                    ctx.set_stroke_color(minor_color);
-                    ctx.set_line_width(0.8);
-                    ctx.stroke();
-
-                    ctx.begin_path();
-                    ctx.move_to(tick_x, h);
-                    ctx.line_to(tick_x, h - 4.0);
-                    ctx.set_stroke_color(minor_color);
-                    ctx.set_line_width(0.8);
-                    ctx.stroke();
-                }
+            if is_cardinal {
+                Self::stroke_segment(ctx, Point::new(tick_x, 0.0), Point::new(tick_x, 10.0), 1.5, tick_color);
+                Self::stroke_segment(ctx, Point::new(tick_x, h), Point::new(tick_x, h - 10.0), 1.5, tick_color);
+                let label = match norm_deg {
+                    0 => "N",
+                    45 => "NE",
+                    90 => "E",
+                    135 => "SE",
+                    180 => "S",
+                    225 => "SW",
+                    270 => "W",
+                    315 => "NW",
+                    _ => "",
+                };
+                let color = if norm_deg == 0 {
+                    Color::from_rgb8(255, 100, 100)
+                } else {
+                    Color::from_rgb8(220, 220, 220)
+                };
+                ctx.set_fill_color(color);
+                ctx.set_font_size(11.0);
+                let text_w = label.len() as f64 * 7.0;
+                ctx.fill_text(label, tick_x - text_w / 2.0, h / 2.0 - 4.0);
+            } else if is_major {
+                Self::stroke_segment(ctx, Point::new(tick_x, 0.0), Point::new(tick_x, 6.0), 1.0, tick_color);
+                Self::stroke_segment(ctx, Point::new(tick_x, h), Point::new(tick_x, h - 6.0), 1.0, tick_color);
+                let label = format!("{}", norm_deg);
+                ctx.set_fill_color(Color::from_rgba8(255, 255, 255, 100));
+                ctx.set_font_size(8.0);
+                let text_w = label.len() as f64 * 5.0;
+                ctx.fill_text(&label, tick_x - text_w / 2.0, h / 2.0 - 3.0);
+            } else if norm_deg % 5 == 0 {
+                let minor = Color::from_rgba8(255, 255, 255, 60);
+                Self::stroke_segment(ctx, Point::new(tick_x, 0.0), Point::new(tick_x, 4.0), 0.8, minor);
+                Self::stroke_segment(ctx, Point::new(tick_x, h), Point::new(tick_x, h - 4.0), 0.8, minor);
             }
         }
     }

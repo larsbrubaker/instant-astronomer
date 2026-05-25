@@ -2,6 +2,10 @@
 **/*.rs.bk
 Cargo.lock.bak
 
+node_modules/
+demo/dist
+demo/public/pkg
+
 # OS
 .DS_Store
 Thumbs.db
@@ -13,6 +17,8 @@ Thumbs.db
 
 # WASM
 /pkg
+instant-astronomer-wasm/pkg
 
-# Claude Code state
+# Claude Code / Cursor agent state
 .claude/
+.cursor/

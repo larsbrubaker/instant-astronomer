@@ -1,10 +1,19 @@
 [alias]
+# `cargo dev` — hot-reload the native shell on every save.
+#
+# Requires `cargo install cargo-watch` (one-time). The native binary is the
+# fastest iteration loop; the WASM path is intentionally separate so its
+# wasm-pack rebuild doesn't run on every edit.
 dev = [
     "watch",
     "-i",
     "target",
     "-i",
-    "instant-astronomer-wasm",
-    "-x",
-    "run -p instant-astronomer-native",
+    "demo/public/pkg",
+    "-i",
+    "instant-astronomer-wasm/pkg",
+    "--use-shell",
+    "powershell",
+    "-s",
+    "cargo run -p instant-astronomer-native",
 ]

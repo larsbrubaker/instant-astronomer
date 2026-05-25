@@ -12,7 +12,7 @@ use nalgebra::{Matrix3, Vector3};
 use std::f64::consts::PI;
 
 /// Coordinates in the equatorial system: Right Ascension and Declination.
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy)]
 pub struct EquatorialCoords {
     /// Right Ascension in radians (0 to 2*PI, corresponding to 0h to 24h)
     pub ra: f64,
@@ -30,7 +30,11 @@ pub struct HorizontalCoords {
 }
 
 /// Representation of a fixed star backdrop element.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+///
+/// `name` is `&'static str` so the catalog (section 3.2 of
+/// `implementation.md` — Yale Bright Star Catalog primitives) can live in a
+/// `const` table without runtime allocation.
+#[derive(Debug, Clone, Copy)]
 pub struct Star {
     pub id: u32,
     pub name: &'static str,

@@ -8,7 +8,7 @@ The entire user interface — controls, panels, overlays, and the embedded 3D sk
 
 ## 1. System Architecture Overview
 
-The system is designed to run entirely client-side inside a WebAssembly (WASM) runtime compiled from Rust, leveraging the device's native sensors and hardware-accelerated graphics via `wgpu`.
+The system is designed to run entirely client-side inside a WebAssembly (WASM) runtime compiled from Rust, leveraging the device's native sensors and hardware-accelerated graphics via `agg-gui` (which renders through `wgpu`).
 
 ```
                   ┌────────────────────────────────────────┐
@@ -35,8 +35,9 @@ The system is designed to run entirely client-side inside a WebAssembly (WASM) r
                   │                             │          │
                   │                             ▼          │
                   │                      ┌──────────────┐  │
-                  │                      │ wgpu Pipeline│  │
-                  │                      │ (3D Render)  │  │
+                  │                      │   agg-gui    │  │
+                  │                      │ (widgets +   │  │
+                  │                      │  wgpu draw)  │  │
                   │                      └──────────────┘  │
                   └────────────────────────────────────────┘
 ```
@@ -45,7 +46,7 @@ The system is designed to run entirely client-side inside a WebAssembly (WASM) r
 * **Zero Backend Costs:** All data assets are hosted statically on GitHub Pages as compressed payloads.
 * **Low Memory Footprint:** Data is parsed streaming or queried via an in-memory SQLite instances to prevent DOM memory exhaustion.
 * **Sub-Millisecond Engine Interfacing:** All projection, coordinate transformations, and matrix transformations are performed in native Rust via WASM compilation target `wasm32-unknown-unknown`.
-* **Single Rust UI Layer:** All HUD elements, control panels, popups, and the 3D sky viewport are composed inside a single `agg-gui` widget tree. No HTML/CSS layer is used for application chrome — the browser only hosts the GL canvas that `agg-gui` draws into.
+* **Unified Render Pipeline:** `agg-gui` owns the single `wgpu` surface and draws everything — control panel widgets, HUD horizon tape, *and* the sky sphere — through its own `DrawCtx` API. There is no separate 3D layer or parallel GL context; stars, constellation lines, and planet glyphs are issued as ordinary `agg-gui` draw calls from within the `SkyView` widget.
 
 ---
 
@@ -54,9 +55,9 @@ The system is designed to run entirely client-side inside a WebAssembly (WASM) r
 Based on the application wireframe, the interface is optimized for single-handed mobile navigation and splits the viewport into a dedicated 3D canvas and a flat configuration tray. **All UI elements — including the 3D sky view itself — are composed as `agg-gui` widgets inside a single root `FlexColumn`,** ensuring consistent layout, theming, hit-testing, and keyboard/focus behavior across desktop and mobile WASM builds.
 
 ### Layout Specification
-* **Upper Viewport (Main Canvas) — `SkyView` Custom Widget:** A full-bleed `agg-gui` widget implementing the `GlPaint` trait (the same hook used by agg-gui's 3D-cube demo) to issue native `wgpu` draw calls for the sky sphere into its assigned widget bounds.
+* **Upper Viewport (Main Canvas) — `SkyView` Custom Widget:** A full-bleed `agg-gui` widget that performs the celestial coordinate math in Rust each frame and emits the projected stars, planets, Sun, and Moon as ordinary `agg-gui` `DrawCtx` calls — filled circles for point sources (sized by visual magnitude), and line paths for constellation figures. No separate GL pipeline is required; `agg-gui`'s own `wgpu` backend rasterizes the sky alongside every other widget.
   * Displays stars, planets, the Sun, and the Moon mapped relative to local orientation.
-  * **Heads-Up Display (HUD) Horizon Tape:** A dynamic horizontal orientation strip rendered immediately above the control panel using `agg-gui`'s standard 2D `DrawCtx` (labels + separators), driven by the device's magnetometer/compass for the cardinal direction markers (`N`, `|`, `NE`, `|`, …).
+  * **Heads-Up Display (HUD) Horizon Tape:** A dynamic horizontal orientation strip rendered immediately above the control panel using `agg-gui`'s standard `DrawCtx` (labels + separators), driven by the device's magnetometer/compass for the cardinal direction markers (`N`, `|`, `NE`, `|`, …).
 * **Lower Configuration Control Panel — `agg-gui` `Container` + `FlexRow`:** Fixed bottom tray composed entirely of stock `agg-gui` widgets:
   * **Geolocation Button (Target Icon):** An `agg-gui` `Button` rendered with a Font Awesome crosshair glyph; its click callback invokes `navigator.geolocation` to fill position data instantly.
   * **Location Selection Controls:** `agg-gui` `ComboBox` widgets for `Country`, `City`, and `State`, with `TextField` instances providing search-as-you-type entry that drives the SQLite FTS5/Soundex queries described in §3.1.
@@ -116,9 +117,9 @@ Instead of tracking celestial bodies via tabular datasets, coordinates are deter
 
 ---
 
-## 4. Render & Coordinate Transformation Engine (`wgpu` via `agg-gui`)
+## 4. Render & Coordinate Transformation Engine
 
-The application maps the fixed celestial sphere primitives to local coordinates, which are transformed via the phone's hardware telemetry matrices. The render pipeline lives inside the `SkyView` widget's `GlPaint` callback, so it shares the same GL surface, device-scale, and event/clip context as every other `agg-gui` widget in the tree — no separate canvas, no DOM compositing.
+The application maps the fixed celestial sphere primitives to local coordinates, which are transformed via the phone's hardware telemetry matrices. All rendering happens inside the `SkyView` widget's `draw` method, which receives the same `DrawCtx` (and underlying `wgpu` surface) that `agg-gui` uses for the control tray and HUD — there is no separate canvas, no separate GL context, and no DOM compositing.
 
 ```
 [Equatorial Space: RA, Dec]
@@ -130,7 +131,7 @@ The application maps the fixed celestial sphere primitives to local coordinates,
 [Camera Viewspace Transformation]
             │
             ▼ (Input: Perspective Matrix)
-[Screen Projection Viewport (wgpu Pipeline)]
+[2D Screen Coordinates → agg-gui DrawCtx → wgpu]
 ```
 
 ### 4.1 Frame Mathematical Execution
@@ -148,21 +149,23 @@ For every rendering frame, the Rust engine evaluates the following pipeline:
      $$\vec{\theta}_{\text{filtered}} = \vec{\theta}_{\text{filtered}} + \kappa \cdot (\vec{\theta}_{\text{raw}} - \vec{\theta}_{\text{filtered}})$$
      *(Set default smoothing modifier $\kappa = 0.12$ for responsive yet stabilized visual output).*
 
-### 4.2 `wgpu` Render Pipeline Mechanics
-* **Vertex Buffer Strategy:**
-  * **Stars:** Kept as a single static vertex point cloud buffer. The vertex shader maps point size directly to visual magnitude $V$.
-  * **Constellations:** Loaded into a static index buffer rendering as an optimized line list (`PrimitiveTopic::LineList`).
-* **Uniform Shader Pipeline:** The calculated local time adjustments, geographic coordinate projections, and filtered device orientation matrices are packed tightly into a single unified uniform buffer passed to the GPU shader instance on every frame refresh. This minimizes CPU-to-GPU data transfer overhead.
-* **Integration with `agg-gui`:** Inside `GlPaint::paint`, the `SkyView` widget receives its current bounds, viewport scissor, and device-pixel scale from `agg-gui`. It draws the celestial sphere first, then yields the GL context back to `agg-gui`, which composites the HUD horizon tape, control tray, and any overlays (tooltips, popups, theme toggle) on top using AGG-tessellated paths in the same frame.
+### 4.2 `SkyView` Draw Mechanics
+Each frame, `SkyView::draw(ctx: &mut DrawCtx, bounds: Rect)` walks its precomputed geometry and issues the following calls into `agg-gui`'s shared `wgpu` surface:
+
+* **Stars:** A single pass over the projected star list emits one `ctx.fill_circle(p, radius_for_magnitude(V), color_for_bv(B-V))` per visible star. Stars whose computed altitude is below the horizon are skipped before any drawing call is made.
+* **Constellations:** Each constellation figure is drawn as a single `ctx.stroke_path(...)` over its line segments, gated by the constellation-lines toggle.
+* **Sun / Moon / Planets:** Rendered as larger filled circles (or small textured quads via `ctx.draw_image` for the Moon phase), tinted by body-specific colors.
+* **HUD overlay:** After the sky pass returns, `agg-gui` continues drawing the horizon tape, control tray, and any popups/tooltips into the same `DrawCtx` — guaranteeing correct Z-order and a single GPU submit per frame.
+* **Frame Cost:** Because every primitive flows through `agg-gui`'s existing batched `wgpu` path, no custom shaders, uniform buffers, or pipeline objects need to be authored for instant-astronomer.
 
 ---
 
 ## 5. Development Phase Roadmap
 
 ### Phase 1: Local Rust & Mathematical Framework
-* Setup a standard Rust workspace with binary and module divisions; add `agg-gui` as the sole UI dependency.
+* Setup a standard Rust workspace with binary and module divisions; add `agg-gui` as the sole UI dependency (its `wgpu` backend doubles as the render layer).
 * Implement Meeus and NASA JPL coordinate algorithms; validate outputs against known star charts.
-* Build the `SkyView` widget as an `agg-gui` `GlPaint` implementor and project raw 3D coordinate arrays into its bounds via `wgpu` inside a native `agg-gui` host window.
+* Build the `SkyView` widget as a standard `agg-gui` widget whose `draw` method projects star/planet coordinates and emits `DrawCtx` circles + line paths into a native `agg-gui` host window.
 
 ### Phase 2: WebAssembly & Asset Packaging
 * Configure compilation flags for the `wasm32-unknown-unknown` target ecosystem and reuse `agg-gui`'s WASM adapters (web keyboard/cursor/clipboard helpers) so the same widget tree runs in the browser unchanged.

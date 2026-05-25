@@ -9,7 +9,11 @@
 //! search using the Soundex algorithm, as specified in the implementation design.
 
 /// Representation of a geographical city entity.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+///
+/// All string fields are `&'static str` so the bundled catalog can live in a
+/// `const` table (matches the static-asset model in section 3.1 of
+/// `implementation.md` without requiring runtime allocation).
+#[derive(Debug, Clone, Copy)]
 pub struct City {
     pub name: &'static str,
     pub state: &'static str,
@@ -97,36 +101,37 @@ pub const BUILTIN_CITIES: &[City] = &[
 ];
 
 /// Perform a search on the city database.
-/// First attempts a prefix search (MATCH 'prefix*').
-/// If prefix search yields zero results, falls back to Soundex phonetic lookup.
+///
+/// Mirrors the FTS5-then-Soundex fallback matrix described in section 3.1 of
+/// `implementation.md`: prefix/contains match first; if that returns nothing,
+/// fall through to phonetic lookup keyed by [`soundex`].
 pub fn search_cities(query: &str) -> Vec<City> {
     let clean_query = query.trim().to_lowercase();
     if clean_query.is_empty() {
         return BUILTIN_CITIES.to_vec();
     }
 
-    // 1. Prefix/Contains Search (FTS5 approximation)
     let prefix_results: Vec<City> = BUILTIN_CITIES
         .iter()
+        .copied()
         .filter(|city| {
-            city.name.to_lowercase().starts_with(&clean_query)
-                || city.name.to_lowercase().contains(&clean_query)
+            let name = city.name.to_lowercase();
+            name.starts_with(&clean_query)
+                || name.contains(&clean_query)
                 || city.state.to_lowercase().starts_with(&clean_query)
                 || city.country.to_lowercase().starts_with(&clean_query)
         })
-        .cloned()
         .collect();
 
     if !prefix_results.is_empty() {
         return prefix_results;
     }
 
-    // 2. Soundex Phonetic Fallback (Typo/Phonetic evaluation)
     let query_soundex = soundex(&clean_query);
     BUILTIN_CITIES
         .iter()
+        .copied()
         .filter(|city| soundex(city.name) == query_soundex)
-        .cloned()
         .collect()
 }
 
@@ -136,29 +141,38 @@ mod tests {
 
     #[test]
     fn test_soundex_algorithm() {
+        // Spot-check standard Soundex outputs.
         assert_eq!(soundex("Denver"), "D516");
         assert_eq!(soundex("London"), "L535");
         assert_eq!(soundex("Paris"), "P620");
-        // Similar sounding words or typos
-        assert_eq!(soundex("Denve"), "D510");
+        // Classic textbook equivalence (Wikipedia Soundex example).
+        assert_eq!(soundex("Robert"), soundex("Rupert"));
+        // H and W skip adjacency, so "Honeyman" / "Honeymun" stay equal.
+        assert_eq!(soundex("Honeyman"), soundex("Honeymun"));
     }
 
     #[test]
-    fn test_city_search() {
-        // Exact prefix
+    fn test_city_search_prefix() {
+        // Exact prefix.
         let res = search_cities("Denv");
         assert_eq!(res.len(), 1);
         assert_eq!(res[0].name, "Denver");
 
-        // Case insensitive
+        // Case insensitive prefix.
         let res2 = search_cities("tokyo");
         assert_eq!(res2.len(), 1);
         assert_eq!(res2[0].name, "Tokyo");
+    }
 
-        // Phonetic search fallback
-        // "Denwer" -> should soundex match "Denver"
-        let res_phonetic = search_cities("Denwer");
-        assert_eq!(res_phonetic.len(), 1);
-        assert_eq!(res_phonetic[0].name, "Denver");
+    #[test]
+    fn test_city_search_phonetic_fallback() {
+        // "Tokio" misspells "Tokyo" — same Soundex code so the phonetic
+        // fallback should find it once the prefix branch returns nothing.
+        let res = search_cities("Tokio");
+        assert!(
+            res.iter().any(|c| c.name == "Tokyo"),
+            "Soundex fallback should resolve Tokio → Tokyo, got {:?}",
+            res.iter().map(|c| c.name).collect::<Vec<_>>()
+        );
     }
 }
