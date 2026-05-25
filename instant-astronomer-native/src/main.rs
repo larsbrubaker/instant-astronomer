@@ -109,6 +109,16 @@ impl AstronomerPlatform for NativePlatform {
         eprintln!("Geolocation: Coordinates updated to Greenwich Royal Observatory (Lat 51.4769, Lng 0.0000)");
         agg_gui::animation::request_draw();
     }
+
+    fn local_offset_minutes(&self) -> i32 {
+        // `now_local()` consults the OS time zone (Win32 `GetTimeZoneInformation`
+        // on Windows; `/etc/localtime` + tzdata on Unix) and includes DST.
+        // Errors mean the platform refused to report a tz — fall back to UTC
+        // rather than guess and silently mislead the user.
+        time::OffsetDateTime::now_local()
+            .map(|d| d.offset().whole_minutes() as i32)
+            .unwrap_or(0)
+    }
 }
 
 fn main() {

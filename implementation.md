@@ -176,3 +176,84 @@ Each frame, `SkyView::draw(ctx: &mut DrawCtx, bounds: Rect)` walks its precomput
 * Wire up browser event listeners (`deviceorientation`, `navigator.geolocation`) into the Rust WASM loop using `web-sys`, feeding values into shared `Rc<Cell<_>>` state cells consumed by the `agg-gui` widget tree.
 * Implement the low-pass stabilizing filters for device sensors.
 * Compose the final control panel from stock `agg-gui` widgets (`Container`, `FlexRow`, `Button`, `ComboBox`, `TextField`, `ToggleSwitch`), wire reactive input states to re-trigger in-memory database queries, and host on GitHub Pages.
+
+---
+
+## 6. Implementation Status (as of 2026-05-25)
+
+This section tracks what's actually shipped vs. what's still on the
+spec's wish list. Update inline whenever a chunk lands or a decision is
+revised.
+
+### Shipped
+* **3-crate workspace** (`-core`, `-native`, `-wasm`) with shared widget
+  tree built by `build_astronomer_app`. Core is `wasm32`-clean; shells
+  inject capabilities through the `AstronomerPlatform` trait.
+* **Sky math** — Julian date, GMST/LST, equatorial→horizontal, Y-up
+  Cartesian projection, low-pass IMU smoothing (`κ = 0.12`). All in
+  `instant-astronomer-core/src/math.rs`.
+* **View rotation** — stored as a single `UnitQuaternion<f64>` so we're
+  free of Euler-angle gimbal lock at the zenith. Mouse drags decompose
+  as **world-axis yaw + camera-local pitch** (`q_world_yaw * view_quat
+  * q_local_pitch`) — that's what keeps the horizon level under
+  arbitrary diagonal drags. Pinned by
+  `math::tests::horizon_stays_level_under_diagonal_drags`.
+* **Solar System bodies** — Sun (low-precision Meeus), Moon (Meeus
+  truncated theory, principal terms), Mercury/Venus/Mars/Jupiter/Saturn
+  via simplified Keplerian elements relative to Earth's heliocentric
+  position. Sub-degree accuracy budget per §3.2 (verified by
+  `stars::tests::sun_position_at_j2000`).
+* **Star catalog** — curated set of ~186 named bright stars to
+  V ≈ 4.4, packed as a bundled CSV (`assets/bright_stars.csv`) parsed
+  once at startup into a `OnceLock<Vec<Star>>`. Seeded 26-star const
+  list (IDs 1..=26) backs the constellation-line index; extended catalog
+  uses IDs 100+. Still well short of the BSC5 full ~9 k stars planned
+  in §3.2.
+* **Constellation lines** — Orion + Ursa Major asterisms wired through
+  `CONSTELLATION_LINES` and toggled by a checkbox. **88 IAU
+  constellation GeoJSON payload from §3.3 is NOT yet integrated.**
+* **City search** — `instant_astronomer_core::cities` ships a ~150-city
+  static index with Soundex phonetic fallback. The SQLite-WASM-with-FTS5
+  pipeline described in §3.1 was **deferred** as overkill for the
+  current city list size; we'll revisit if the catalog grows past
+  ~10 k entries.
+* **Geolocation** — `navigator.geolocation.getCurrentPosition` in WASM;
+  a stub setting Greenwich coords on native.
+* **Device orientation** — WASM listens for `deviceorientation` /
+  `deviceorientationabsolute` and pushes into the core via
+  `on_device_orientation(alpha, beta, gamma)`.
+* **DST-correct local clock** — top-bar readout shows `UTC HH:MM ·
+  local HH:MM` where `local` uses the platform-reported UTC offset
+  (`time::OffsetDateTime::now_local()` on native, `Date.getTimezoneOffset()`
+  on WASM). The offset is queried every paint so a DST transition while
+  the app is open updates the clock automatically.
+* **HUD** — horizon strip (compass tape), altitude ladder, centre
+  reticle, alt = 0 great-circle line projected across the sky for
+  "how far above the horizon am I looking?" feedback.
+* **Calibrate-to-here button** — snapshots current compass heading into
+  `calibration_yaw`, applied as a world-axis offset every frame.
+* **GitHub Pages deploy workflow** — WASM bundle published on every
+  push to `master`.
+
+### Deferred / not yet implemented
+* **Full Yale BSC5 (~9 k stars)** — current 186-star CSV is the
+  intermediate. The compressed-asset-via-GitHub-Pages pipeline from
+  §3.2 is still the long-term target.
+* **88 IAU constellations** — only Orion + Ursa Major are drawn today.
+* **Per-country city-DB gzipped payloads served from GitHub Pages**
+  (§3.1) — current city list is statically bundled in the binary; works
+  fine at our current scale.
+* **SQLite-WASM in-memory DB + FTS5/Soundex** (§3.1) — replaced by an
+  in-process Rust search with a Soundex fallback; revisit when catalog
+  size warrants.
+* **Country / State / City `ComboBox`** (§2 Layout Spec) — current UI
+  uses a single text-field search.
+
+### Known limitations
+* The local time we display is the **device's** wall clock, not the
+  wall clock at the searched lat/lng. Looking up "Tokyo" from a Denver
+  device still shows Denver local time. Adding a lat/lng → IANA tz
+  lookup would change that, at the cost of a tzdata-sized asset payload.
+* `request_device` on iOS Safari often needs `requestPermission()` for
+  `DeviceOrientationEvent` — the JS shim handles it where possible;
+  a "Tap to enable orientation" affordance is on the wish list.

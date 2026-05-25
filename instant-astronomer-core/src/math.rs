@@ -338,6 +338,44 @@ mod tests {
         assert!((z_rot.z - 1.0).abs() < 1e-9, "z_rot.z = {}", z_rot.z);
     }
 
+    /// Regression test for the horizon-rotates bug. The drag handler in
+    /// SkyView used to compose yaw as a camera-local rotation, which
+    /// allowed roll to accumulate after any sequence of diagonal /
+    /// alternating horizontal+vertical drags. The fix: yaw must rotate
+    /// around the **world** up axis (Y); only pitch is camera-local
+    /// (around X). With that composition, the world-up vector projected
+    /// into camera space must always have zero camera-right (X) component
+    /// — that's the geometric meaning of "no roll, horizon stays level".
+    #[test]
+    fn horizon_stays_level_under_diagonal_drags() {
+        use nalgebra::{UnitQuaternion, Vector3};
+        // World-Y yaw, camera-X pitch — this is the composition rule
+        // the SkyView handler should use.
+        let apply_drag = |q: UnitQuaternion<f64>, dx: f64, dy: f64| -> UnitQuaternion<f64> {
+            let yaw_w = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), -dx);
+            let pitch_l = UnitQuaternion::from_axis_angle(&Vector3::x_axis(), dy);
+            yaw_w * q * pitch_l
+        };
+
+        // Walk through a few mixed drags that previously induced roll.
+        let mut q = UnitQuaternion::<f64>::identity();
+        q = apply_drag(q, 0.5, 0.4);
+        q = apply_drag(q, -0.3, 0.2);
+        q = apply_drag(q, 0.2, -0.1);
+        q = apply_drag(q, 0.6, 0.3);
+
+        // Camera-right axis (+X) in world frame. The world-up vector
+        // (+Y world) must have NO projection onto camera-right — that
+        // is, the horizon line as seen by the camera is horizontal.
+        let world_up = Vector3::y();
+        let cam_right_in_world = q * Vector3::x();
+        let roll_component = world_up.dot(&cam_right_in_world);
+        assert!(
+            roll_component.abs() < 1e-12,
+            "horizon must stay level — got roll component {roll_component}"
+        );
+    }
+
     /// Sanity check that incremental quaternion composition produces
     /// the same result as a single equivalent rotation. Pins down the
     /// camera-local rotation pattern the SkyView mouse-drag handler

@@ -18,7 +18,7 @@ mod hud;
 use crate::math::{
     equatorial_to_horizontal, horizontal_to_cartesian, HorizontalCoords,
 };
-use crate::stars::{calculate_solar_system_bodies, BRIGHTEST_STARS, CONSTELLATION_LINES};
+use crate::stars::{all_stars, calculate_solar_system_bodies, BRIGHTEST_STARS, CONSTELLATION_LINES};
 use nalgebra::{UnitQuaternion, Vector3};
 
 use agg_gui::color::Color;
@@ -272,16 +272,22 @@ impl Widget for SkyViewWidget {
                     let dy = pos.y - down.last.y;
                     let sensitivity = 0.003;
 
-                    // Compose camera-local rotations into `view_quat`:
-                    //   - horizontal drag rotates around the camera's
-                    //     local **up** axis (= +Y in view frame),
-                    //   - vertical drag rotates around the camera's
-                    //     local **right** axis (= +X in view frame).
-                    // No gimbal lock anywhere on the sphere -- you can
-                    // sweep the camera straight up through the zenith
-                    // and out the other side and the horizon stays
-                    // correctly oriented.
-                    let q_local_yaw = UnitQuaternion::from_axis_angle(
+                    // Horizon-locked FPS-camera composition:
+                    //   - horizontal drag rotates around the **world**
+                    //     up axis (+Y in world frame). Applied on the
+                    //     LEFT so it's expressed in world coordinates
+                    //     independent of how the camera is currently
+                    //     oriented — without this, a previous pitch
+                    //     drag would tilt the camera's local Y and
+                    //     subsequent horizontal drags would induce roll
+                    //     (the "horizon rotates" regression).
+                    //   - vertical drag rotates around the **camera-
+                    //     local** right axis (+X in view frame).
+                    //     Applied on the RIGHT so the pitch is in the
+                    //     camera's current frame.
+                    // No gimbal lock anywhere — quaternions sidestep
+                    // the Euler-angle pole problem entirely.
+                    let q_world_yaw = UnitQuaternion::from_axis_angle(
                         &Vector3::y_axis(),
                         -dx * sensitivity,
                     );
@@ -289,8 +295,7 @@ impl Widget for SkyViewWidget {
                         &Vector3::x_axis(),
                         dy * sensitivity,
                     );
-                    let local = q_local_yaw * q_local_pitch;
-                    let new_quat = local * self.view_quat.get();
+                    let new_quat = q_world_yaw * self.view_quat.get() * q_local_pitch;
                     self.view_quat.set(new_quat);
                     agg_gui::animation::request_draw();
                 }
@@ -379,7 +384,7 @@ impl Widget for SkyViewWidget {
         // ground band at the bottom of the screen reads as actual
         // ground — no stars peeking out from below.
         ctx.set_font(Arc::clone(&self.font));
-        for star in BRIGHTEST_STARS {
+        for star in all_stars() {
             let horiz = equatorial_to_horizontal(star.coords, lat, lst);
             if horiz.alt < 0.0 {
                 continue;

@@ -42,6 +42,13 @@ struct WasmPlatform {
 }
 
 impl AstronomerPlatform for WasmPlatform {
+    fn local_offset_minutes(&self) -> i32 {
+        // `Date.getTimezoneOffset()` returns minutes WEST of UTC with
+        // DST applied (e.g. PDT → +420 in JS). The trait wants east-
+        // positive minutes (e.g. PDT → -420), so negate.
+        -(js_sys::Date::new_0().get_timezone_offset() as i32)
+    }
+
     fn request_geolocation(&self) {
         let Some(window) = web_sys::window() else {
             return;
@@ -435,6 +442,12 @@ pub fn set_client_platform(name: &str, pointer_coarse: bool) {
     let profile = agg_gui::input_profile::input_profile_from_hint(name, pointer_coarse);
     agg_gui::input_profile::set_input_profile(profile);
     agg_gui::widgets::on_screen_keyboard::set_enabled(profile.is_mobile_touch());
+    // Apply the recommended UX zoom only here — at the **platform
+    // shell** boundary where we actually know the user is on a real
+    // touch device. `set_input_profile` deliberately doesn't, so
+    // programmatic profile changes (e.g. agg-gui's mobile-keyboard
+    // demo's radio) don't silently resize the desktop UI.
+    agg_gui::ux_scale::set_ux_scale(profile.recommended_ux_scale());
     mark_dirty();
 }
 

@@ -73,7 +73,17 @@ impl Widget for StatusText {
     fn layout(&mut self, available: Size) -> Size {
         // Reserve enough vertical space for a single line plus a little padding.
         let h = (self.font_size + 6.0).min(available.height.max(self.font_size + 6.0));
-        let w = available.width.max(80.0);
+        // Measure the *actual* text so a `StatusText` placed as a fixed
+        // child of a FlexRow reports its real natural width instead of
+        // greedily claiming `available.width`. The previous greedy code
+        // pushed sibling flex children to width zero and let `FlexRow`'s
+        // cursor advance past the row, causing top-bar widgets to paint
+        // on top of each other.
+        let text = (self.text_fn)();
+        self.last_text = text;
+        let metrics =
+            agg_gui::text::measure_text_metrics(&self.font, &self.last_text, self.font_size);
+        let w = metrics.width.min(available.width);
         self.bounds = Rect::new(0.0, 0.0, w, h);
         Size::new(w, h)
     }
@@ -93,7 +103,51 @@ impl Widget for StatusText {
         ctx.set_font(Arc::clone(&self.font));
         ctx.set_font_size(self.font_size);
         ctx.set_fill_color(self.color);
+        // Clip so a stale `last_text` width estimate (or a parent that
+        // ignored our requested size) can't bleed glyphs into the
+        // adjacent widget — top-bar overlap regression.
+        ctx.save();
+        ctx.clip_rect(0.0, 0.0, self.bounds.width, self.bounds.height);
         // Y-up: place baseline a couple of pixels above the bottom of the row.
         ctx.fill_text(&text, 0.0, 4.0);
+        ctx.restore();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::load_default_font;
+
+    /// `StatusText::layout` must report the *measured* text width, not the
+    /// full `available.width`. The regression: when this widget was used as
+    /// a fixed-width child of a `FlexRow`, it claimed the entire row width
+    /// for itself, starved sibling flex children, and the cursor advanced
+    /// past the visible row so the next sibling ended up painted on top of
+    /// us.
+    #[test]
+    fn layout_width_tracks_measured_text_not_available_width() {
+        let font = load_default_font();
+        let mut w = StatusText::new(font, || "Lat: 39.7892°  Lng: -104.9903°".to_string());
+        let size = w.layout(Size::new(2000.0, 30.0));
+        assert!(
+            size.width < 600.0,
+            "StatusText should report measured text width, got {} for ~30-char string",
+            size.width
+        );
+        assert!(
+            size.width > 0.0,
+            "StatusText should report a positive width for non-empty text"
+        );
+    }
+
+    /// Empty text must still have a non-degenerate height so a row built
+    /// from `StatusText`s doesn't collapse.
+    #[test]
+    fn layout_empty_text_keeps_row_height() {
+        let font = load_default_font();
+        let mut w = StatusText::new(font, String::new);
+        let size = w.layout(Size::new(800.0, 30.0));
+        assert!(size.height > 0.0);
     }
 }

@@ -12,8 +12,6 @@ dev = [
     "demo/public/pkg",
     "-i",
     "instant-astronomer-wasm/pkg",
-    "--use-shell",
-    "powershell",
-    "-s",
-    "cargo run -p instant-astronomer-native",
+    "-x",
+    "run -p instant-astronomer-native",
 ]

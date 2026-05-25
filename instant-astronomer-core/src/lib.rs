@@ -59,6 +59,14 @@ pub trait AstronomerPlatform: 'static {
     /// update [`AstronomerHandles::latitude`] / `longitude` and call
     /// `agg_gui::animation::request_draw` when results arrive.
     fn request_geolocation(&self);
+
+    /// Minutes east of UTC for the device's wall clock, with DST applied
+    /// (e.g. PDT = -420, IST = +330). Used purely for the clock readout
+    /// in the configuration tray — the sky math runs in UTC and ignores
+    /// this. Default returns 0 (UTC) for callers that don't care.
+    fn local_offset_minutes(&self) -> i32 {
+        0
+    }
 }
 
 /// Handles to the live state cells the core app exposes to platform shells.
@@ -230,16 +238,18 @@ fn build_control_panel<P: AstronomerPlatform>(
         .with_font_size(12.0)
     };
 
-    // Live clock showing both UTC and an approximate local time (solar
-    // time derived from longitude). The user wanted DST-correct legal
-    // time, which we don't have a tz database for; this approximation
-    // is good enough to confirm "yes, the app knows roughly where I am
-    // and what time it is".
+    // Live clock — UTC plus the device's local time with DST applied
+    // (offset comes from the platform shell: time crate on native,
+    // `Date.getTimezoneOffset` on WASM). The offset is queried every
+    // paint so a user crossing a DST boundary while the app is open
+    // sees the clock update without a restart.
     let time_label = {
         let ts = Rc::clone(&timestamp_ms);
-        let lng = Rc::clone(&longitude);
-        StatusText::new(Arc::clone(&font), move || format_clock_label(ts.get(), lng.get()))
-            .with_font_size(11.0)
+        let platform_for_clock = Rc::clone(&platform);
+        StatusText::new(Arc::clone(&font), move || {
+            format_clock_label(ts.get(), platform_for_clock.local_offset_minutes())
+        })
+        .with_font_size(11.0)
     };
 
     let row_1 = FlexRow::new()
@@ -371,16 +381,35 @@ pub fn current_unix_ms() -> i64 {
 /// roughly Pacific time, someone in London will see roughly UK time,
 /// etc. Worth ~30 minutes of error vs. the alternative of bundling
 /// `tzf-rs` (~5 MB of polygon data) into the WASM blob.
-fn format_clock_label(timestamp_ms: i64, longitude_deg: f64) -> String {
+fn format_clock_label(timestamp_ms: i64, offset_minutes: i32) -> String {
     let utc_h = ((timestamp_ms / 3_600_000) % 24 + 24) % 24;
     let utc_m = ((timestamp_ms / 60_000) % 60 + 60) % 60;
-    // Solar local time = UTC + longitude/15 hours, wrapped to [0, 24).
-    let solar_offset_ms = (longitude_deg * 4.0 * 60.0 * 1000.0) as i64; // 4 min per °
-    let local_ms = timestamp_ms + solar_offset_ms;
+    // Local wall clock = UTC + platform-reported offset. The platform
+    // applies DST, so we just add minutes blindly here.
+    let local_ms = timestamp_ms + (offset_minutes as i64) * 60_000;
     let l_h = ((local_ms / 3_600_000) % 24 + 24) % 24;
     let l_m = ((local_ms / 60_000) % 60 + 60) % 60;
     format!(
-        "UTC {:02}:{:02} · solar {:02}:{:02}",
+        "UTC {:02}:{:02} · local {:02}:{:02}",
         utc_h, utc_m, l_h, l_m
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Local clock follows the platform-reported offset, DST included.
+    /// 1700000000000 ms is 2023-11-14T22:13:20Z; with offset -480 (PST)
+    /// that's 14:13 local. With +330 (IST) that's 03:43 next-day local
+    /// — wrap correctly.
+    #[test]
+    fn format_clock_label_applies_offset_with_wrap() {
+        let s = format_clock_label(1_700_000_000_000, -480);
+        assert!(s.contains("UTC 22:13"), "got: {s}");
+        assert!(s.contains("local 14:13"), "got: {s}");
+
+        let s = format_clock_label(1_700_000_000_000, 330);
+        assert!(s.contains("local 03:43"), "got: {s}");
+    }
 }

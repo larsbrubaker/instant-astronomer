@@ -14,6 +14,7 @@
 use crate::math::{CelestialBody, EquatorialCoords, Star};
 use agg_gui::color::Color;
 use std::f64::consts::PI;
+use std::sync::OnceLock;
 
 /// A pair of star IDs representing a constellation line connection.
 #[derive(Debug, Clone, Copy)]
@@ -59,6 +60,83 @@ pub const BRIGHTEST_STARS: &[Star] = &[
     Star { id: 25, name: "Mizar",      coords: EquatorialCoords { ra: 3.5119, dec:  0.9572 }, magnitude:  2.23, color_index:  0.00 },
     Star { id: 26, name: "Alkaid",     coords: EquatorialCoords { ra: 3.6111, dec:  0.8572 }, magnitude:  1.85, color_index: -0.19 },
 ];
+
+/// Extended catalog of named bright stars, parsed once from the bundled
+/// CSV asset. IDs start at 100 to avoid collision with [`BRIGHTEST_STARS`]
+/// (which the constellation-line table references by ID). Magnitudes
+/// extend to roughly V≈4.4 so the sky reads as actually-populated under
+/// dark conditions instead of the sparse 26-star seed set.
+///
+/// The eventual scope (per `implementation.md` §3.2) is the full Yale
+/// Bright Star Catalog (~9k entries, ~150 KB compressed). This curated
+/// ~160-star set is the intermediate step before we wire up that asset
+/// pipeline.
+const EXTENDED_CATALOG_CSV: &str = include_str!("../assets/bright_stars.csv");
+
+/// Lazily-built combined view: seeded [`BRIGHTEST_STARS`] followed by the
+/// parsed CSV catalog. Names from the CSV are heap-allocated once at
+/// startup and leaked into the static lifetime so callers can keep using
+/// `&'static str` (matching the seed table). The leak is bounded —
+/// happens exactly once per process.
+static ALL_STARS: OnceLock<Vec<Star>> = OnceLock::new();
+
+/// Return every fixed star known to the renderer (seed + extended).
+/// Sky-view rendering iterates this; constellation-line ID lookups stay
+/// on [`BRIGHTEST_STARS`] since those IDs live in 1..=26 only.
+pub fn all_stars() -> &'static [Star] {
+    ALL_STARS.get_or_init(|| {
+        let mut v: Vec<Star> = BRIGHTEST_STARS.to_vec();
+        v.extend(parse_extended_catalog(EXTENDED_CATALOG_CSV));
+        v
+    })
+}
+
+/// Parse the CSV asset. Each line: `id,name,ra_rad,dec_rad,mag,bv`.
+/// Malformed lines are skipped (logged in debug only) — the asset is
+/// authored alongside the parser and a malformed row indicates a typo we
+/// want to notice in development without crashing the app in production.
+fn parse_extended_catalog(csv: &str) -> Vec<Star> {
+    let mut out = Vec::with_capacity(256);
+    for line in csv.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split(',');
+        let Some(id) = parts.next().and_then(|s| s.trim().parse::<u32>().ok()) else {
+            debug_assert!(false, "bright_stars.csv: bad id in {line:?}");
+            continue;
+        };
+        let Some(name) = parts.next().map(|s| s.trim().to_string()) else {
+            debug_assert!(false, "bright_stars.csv: missing name in {line:?}");
+            continue;
+        };
+        let Some(ra) = parts.next().and_then(|s| s.trim().parse::<f64>().ok()) else {
+            debug_assert!(false, "bright_stars.csv: bad ra in {line:?}");
+            continue;
+        };
+        let Some(dec) = parts.next().and_then(|s| s.trim().parse::<f64>().ok()) else {
+            debug_assert!(false, "bright_stars.csv: bad dec in {line:?}");
+            continue;
+        };
+        let Some(mag) = parts.next().and_then(|s| s.trim().parse::<f32>().ok()) else {
+            debug_assert!(false, "bright_stars.csv: bad mag in {line:?}");
+            continue;
+        };
+        let Some(bv) = parts.next().and_then(|s| s.trim().parse::<f32>().ok()) else {
+            debug_assert!(false, "bright_stars.csv: bad bv in {line:?}");
+            continue;
+        };
+        out.push(Star {
+            id,
+            name: Box::leak(name.into_boxed_str()),
+            coords: EquatorialCoords { ra, dec },
+            magnitude: mag,
+            color_index: bv,
+        });
+    }
+    out
+}
 
 /// Constellation line connections for the bundled asterisms.
 ///
@@ -324,6 +402,64 @@ mod tests {
             assert!(
                 names.contains(&expected),
                 "expected {expected} in {names:?}"
+            );
+        }
+    }
+
+    /// Sanity-check the parsed extended catalog: it must populate, all
+    /// rows must parse (no silent skips), every star must have a unique
+    /// ID, magnitudes/coordinates must be physically sensible, and the
+    /// seeded constellation-line IDs (1..=26) must still resolve in
+    /// `BRIGHTEST_STARS` so the asterism overlay can't quietly break.
+    #[test]
+    fn extended_catalog_parses_and_is_consistent() {
+        let stars = all_stars();
+        assert!(
+            stars.len() > 100,
+            "expected substantial extended catalog, got {} stars",
+            stars.len()
+        );
+        // IDs must be unique across seed + extended set.
+        let mut ids: Vec<u32> = stars.iter().map(|s| s.id).collect();
+        ids.sort_unstable();
+        let before = ids.len();
+        ids.dedup();
+        assert_eq!(before, ids.len(), "duplicate star IDs in combined catalog");
+        // Constellation-line endpoints all live in 1..=26 — must still
+        // be findable.
+        for line in CONSTELLATION_LINES {
+            assert!(
+                BRIGHTEST_STARS.iter().any(|s| s.id == line.from_id),
+                "missing from_id {} for {}",
+                line.from_id,
+                line.constellation_name
+            );
+            assert!(
+                BRIGHTEST_STARS.iter().any(|s| s.id == line.to_id),
+                "missing to_id {} for {}",
+                line.to_id,
+                line.constellation_name
+            );
+        }
+        // Every star must have plausible coords + magnitude.
+        for s in stars {
+            assert!(
+                s.coords.ra >= 0.0 && s.coords.ra < 2.0 * PI,
+                "{} RA out of [0, 2π): {}",
+                s.name,
+                s.coords.ra
+            );
+            assert!(
+                s.coords.dec >= -PI / 2.0 && s.coords.dec <= PI / 2.0,
+                "{} Dec out of [-π/2, π/2]: {}",
+                s.name,
+                s.coords.dec
+            );
+            assert!(
+                s.magnitude > -2.0 && s.magnitude < 8.0,
+                "{} magnitude implausible: {}",
+                s.name,
+                s.magnitude
             );
         }
     }

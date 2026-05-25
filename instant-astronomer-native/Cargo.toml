@@ -22,3 +22,6 @@ serde_json = { workspace = true }
 pollster = "0.4"
 wgpu = { version = "29", default-features = false, features = ["wgsl", "vulkan", "dx12", "metal"] }
 winit = "0.30"
+# `time` with `local-offset` so the clock readout shows real DST-correct
+# local time on native (no IANA tz lookup; uses OS time zone APIs).
+time = { version = "0.3", features = ["local-offset"] }
