@@ -38,6 +38,7 @@ type WasmModule = {
   set_location_degrees: (latitudeDeg: number, longitudeDeg: number) => void;
   set_timestamp_ms: (timestampMs: number) => void;
   set_client_platform: (name: string, pointerCoarse: boolean) => void;
+  set_device_pixel_ratio: (dpr: number) => void;
   software_keyboard_visible: () => boolean;
 };
 
@@ -240,9 +241,21 @@ function detectPointerCoarse(): boolean {
 
 async function boot(): Promise<void> {
   const wasm = await loadWasm();
-  // Tell agg-gui about the device before we paint a frame so any text
-  // input the user touches immediately gets the right keyboard.
+  // Tell agg-gui about the device before we paint a frame:
+  // - device-pixel ratio so HiDPI mobile screens render glyphs at the
+  //   right physical size (without this, a Pixel 8 paints everything
+  //   at 1/3 the intended size and the user can't read it),
+  // - input profile + UA so the on-screen keyboard auto-enables on
+  //   touch devices and picks the right per-OS chrome.
+  wasm.set_device_pixel_ratio(window.devicePixelRatio || 1);
   wasm.set_client_platform(detectClientPlatform(), detectPointerCoarse());
+
+  // Keep DPR fresh: dragging a window between monitors or rotating
+  // a tablet can change devicePixelRatio mid-session.
+  window.addEventListener("resize", () => {
+    wasm.set_device_pixel_ratio(window.devicePixelRatio || 1);
+  });
+
   wirePointerInput(wasm);
   requestGeolocation(wasm);
 

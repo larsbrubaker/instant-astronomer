@@ -402,6 +402,24 @@ pub fn on_mouse_up(x: f64, y: f64, button: u8, shift: bool, ctrl: bool, alt: boo
 ///   clockwise yaw the rotation matrix expects.
 /// - On Android Chrome with `deviceorientationabsolute`, pass `event.alpha`
 ///   directly.
+/// Hand the device-pixel ratio to agg-gui so it can scale text /
+/// strokes / UI by the right factor.
+///
+/// **This is required for the app to look right on HiDPI mobile
+/// screens.** Without it, agg-gui treats the canvas dimensions as
+/// logical pixels — so on a Pixel 8 with `devicePixelRatio = 3`,
+/// every glyph renders 3× too small to read.
+///
+/// Call once at boot with `window.devicePixelRatio`, and again from a
+/// resize listener so a CSS-zoom or window-resize that changes the DPR
+/// (e.g. dragging a window from one monitor to another) keeps the
+/// rendering crisp.
+#[wasm_bindgen]
+pub fn set_device_pixel_ratio(dpr: f64) {
+    agg_gui::set_device_scale(dpr.max(0.5));
+    mark_dirty();
+}
+
 /// Hand the JS-side platform name + `(pointer: coarse)` detection result
 /// to agg-gui so:
 ///
