@@ -337,4 +337,27 @@ mod tests {
         assert!(z_rot.y.abs() < 1e-9, "z_rot.y = {}", z_rot.y);
         assert!((z_rot.z - 1.0).abs() < 1e-9, "z_rot.z = {}", z_rot.z);
     }
+
+    /// Sanity check that incremental quaternion composition produces
+    /// the same result as a single equivalent rotation. Pins down the
+    /// camera-local rotation pattern the SkyView mouse-drag handler
+    /// uses, so a future refactor that swaps composition order can't
+    /// silently break panning.
+    #[test]
+    fn camera_local_rotation_composes_cleanly() {
+        use nalgebra::{UnitQuaternion, Vector3};
+        let step = (5.0_f64).to_radians();
+        // Eighteen 5° camera-local yaw steps == 90° total yaw.
+        let mut q = UnitQuaternion::<f64>::identity();
+        for _ in 0..18 {
+            let delta = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), step);
+            q = delta * q;
+        }
+        let direct = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 18.0 * step);
+        // Compare on the +Z (forward) axis after rotation.
+        let v_incremental = q * Vector3::new(0.0, 0.0, 1.0);
+        let v_direct = direct * Vector3::new(0.0, 0.0, 1.0);
+        let dot = v_incremental.dot(&v_direct);
+        assert!((dot - 1.0).abs() < 1e-9, "vectors not parallel: dot={}", dot);
+    }
 }

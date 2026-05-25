@@ -15,25 +15,30 @@ use agg_gui::event::{Event, EventResult};
 use agg_gui::geometry::{Point, Rect, Size};
 use agg_gui::text::Font;
 use agg_gui::widget::Widget;
+use nalgebra::UnitQuaternion;
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-/// Horizontal compass strip widget driven by a shared yaw cell (radians).
+use crate::view_quat_heading_rad;
+
+/// Horizontal compass strip widget. Derives the user's compass
+/// heading from the shared `view_quat` so it stays in lockstep with
+/// the sky-view projection (gimbal-lock-free, even at the zenith).
 pub struct HorizonTapeWidget {
     bounds: Rect,
     children: Vec<Box<dyn Widget>>,
     font: Arc<Font>,
-    yaw: Rc<Cell<f64>>,
+    view_quat: Rc<Cell<UnitQuaternion<f64>>>,
 }
 
 impl HorizonTapeWidget {
-    pub fn new(font: Arc<Font>, yaw: Rc<Cell<f64>>) -> Self {
+    pub fn new(font: Arc<Font>, view_quat: Rc<Cell<UnitQuaternion<f64>>>) -> Self {
         Self {
             bounds: Rect::default(),
             children: Vec::new(),
             font,
-            yaw,
+            view_quat,
         }
     }
 
@@ -106,13 +111,12 @@ impl Widget for HorizonTapeWidget {
 
         // Compass marks: 4 px per degree, ±half-screen.
         //
-        // The `yaw` cell stores the W3C `alpha` convention: angle
-        // measured **counter-clockwise** from magnetic north (so
-        // alpha = 90° = facing west). Compass tape labels are in the
-        // standard **clockwise** convention (N=0, E=90, S=180, W=270).
-        // Convert here so the tick that matches the user's actual
-        // heading slides under the centre indicator.
-        let yaw_w3c_deg = self.yaw.get().to_degrees();
+        // The shared `view_quat` is the world→view rotation;
+        // `view_quat_heading_rad` extracts the camera-forward direction's
+        // W3C alpha (CCW from north). Compass tape labels are in the
+        // standard CW convention (N=0, E=90, S=180, W=270), so negate
+        // and normalise into [0, 360).
+        let yaw_w3c_deg = view_quat_heading_rad(self.view_quat.get()).to_degrees();
         let mut yaw_deg = -yaw_w3c_deg;
         yaw_deg = ((yaw_deg % 360.0) + 360.0) % 360.0;
         let pixels_per_degree = 4.0_f64;

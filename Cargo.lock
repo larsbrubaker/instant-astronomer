@@ -1320,6 +1320,7 @@ dependencies = [
  "demo-wgpu",
  "instant-astronomer-core",
  "js-sys",
+ "nalgebra",
  "serde",
  "serde_json",
  "wasm-bindgen",

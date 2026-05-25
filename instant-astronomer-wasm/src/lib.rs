@@ -447,30 +447,36 @@ pub fn software_keyboard_visible() -> bool {
     agg_gui::widgets::on_screen_keyboard::is_visible()
 }
 
-/// Push a smoothed compass + tilt reading from the browser's
-/// `deviceorientation` (or `deviceorientationabsolute`) event.
+/// Push a compass + tilt reading from the browser's
+/// `deviceorientation` (or `deviceorientationabsolute`) event into the
+/// core's `view_quat` state cell.
 ///
-/// Conversions performed here so the math layer can use direct radians:
-///
-/// - `alpha_deg`: W3C alpha — CCW from magnetic north when the device
-///   is face up. Stored directly as yaw (radians). The JS shell hands
-///   in `event.alpha` on Android-absolute or `360 - webkitCompassHeading`
+/// Conversions:
+/// - `alpha_deg`: W3C alpha — CCW from magnetic north. JS hands in
+///   `event.alpha` on Android-absolute or `360 - webkitCompassHeading`
 ///   on iOS so the value is always W3C-CCW.
 /// - `beta_deg`: front-to-back tilt. 0 = flat face-up; 90 = upright;
-///   180 = face-down. The sky-view's matrix wants `pitch = 0` to mean
-///   "looking at the horizon", so we subtract 90. Without this
-///   subtraction simply holding the phone upright already looked 90°
-///   above the horizon and stars near the horizon couldn't be reached.
-/// - `gamma_deg`: left-to-right tilt. Stored as roll; the matrix
-///   currently ignores it so a slight phone roll doesn't bank the
-///   horizon, but the cell is kept up to date for future use.
+///   180 = face-down. The projection wants `pitch = 0` for "looking
+///   at the horizon", so we subtract 90.
+/// - `gamma_deg`: left-to-right tilt. Ignored for now (gives a stable
+///   horizon even if the user holds the phone slightly rolled); the
+///   value's still part of the conversion so adding roll support is
+///   just a one-line change.
+///
+/// The three Euler angles are composed into a unit quaternion as
+/// `Rx(pitch) * Ry(yaw)` -- world→view -- which is what the
+/// sky-view projection consumes. No gimbal lock at the zenith.
 #[wasm_bindgen]
 pub fn on_device_orientation(alpha_deg: f64, beta_deg: f64, gamma_deg: f64) {
+    let _ = gamma_deg; // roll wired but unused
+    let yaw = alpha_deg.to_radians();
+    let pitch = (beta_deg - 90.0).to_radians();
+    let q_yaw = nalgebra::UnitQuaternion::from_axis_angle(&nalgebra::Vector3::y_axis(), yaw);
+    let q_pitch = nalgebra::UnitQuaternion::from_axis_angle(&nalgebra::Vector3::x_axis(), pitch);
+    let view = q_pitch * q_yaw;
     HANDLES.with(|h_cell| {
         if let Some(h) = h_cell.borrow().as_ref() {
-            h.yaw.set(alpha_deg.to_radians());
-            h.pitch.set((beta_deg - 90.0).to_radians());
-            h.roll.set(gamma_deg.to_radians());
+            h.view_quat.set(view);
         }
     });
     agg_gui::animation::request_draw();

@@ -16,10 +16,10 @@
 mod hud;
 
 use crate::math::{
-    device_orientation_matrix, equatorial_to_horizontal, horizontal_to_cartesian,
-    HorizontalCoords, LowPassFilter,
+    equatorial_to_horizontal, horizontal_to_cartesian, HorizontalCoords,
 };
 use crate::stars::{calculate_solar_system_bodies, BRIGHTEST_STARS, CONSTELLATION_LINES};
+use nalgebra::{UnitQuaternion, Vector3};
 
 use agg_gui::color::Color;
 use agg_gui::draw_ctx::DrawCtx;
@@ -78,15 +78,15 @@ pub struct SkyViewWidget {
     longitude: Rc<Cell<f64>>,
     timestamp_ms: Rc<Cell<i64>>,
 
-    yaw: Rc<Cell<f64>>,
-    pitch: Rc<Cell<f64>>,
-    roll: Rc<Cell<f64>>,
-    /// Subtracted from `yaw` before the projection runs. Lets the user
-    /// re-align "where my phone is pointing" with "what the app draws as
-    /// north" — see the Calibrate button in the control panel. Stored
-    /// in radians.
+    /// World→view rotation. Mouse drag composes camera-local
+    /// rotations into this cell; the WASM shell `set()`s it on every
+    /// `deviceorientation` event after converting Euler → quaternion.
+    /// Using a quaternion sidesteps the gimbal-lock singularity that
+    /// the previous Tait-Bryan storage hit at the zenith / nadir.
+    view_quat: Rc<Cell<UnitQuaternion<f64>>>,
+    /// Compass-offset calibration around the world up axis. Subtracted
+    /// before the projection. See the Calibrate button.
     calibration_yaw: Rc<Cell<f64>>,
-    filter: LowPassFilter,
 
     show_constellations: Rc<Cell<bool>>,
 
@@ -117,9 +117,7 @@ impl SkyViewWidget {
         latitude: Rc<Cell<f64>>,
         longitude: Rc<Cell<f64>>,
         timestamp_ms: Rc<Cell<i64>>,
-        yaw: Rc<Cell<f64>>,
-        pitch: Rc<Cell<f64>>,
-        roll: Rc<Cell<f64>>,
+        view_quat: Rc<Cell<UnitQuaternion<f64>>>,
         calibration_yaw: Rc<Cell<f64>>,
         show_constellations: Rc<Cell<bool>>,
     ) -> Self {
@@ -130,12 +128,8 @@ impl SkyViewWidget {
             latitude,
             longitude,
             timestamp_ms,
-            yaw,
-            pitch,
-            roll,
+            view_quat,
             calibration_yaw,
-            // κ = 0.12 (telemetry smoothing modifier) per section 4.1 of implementation.md
-            filter: LowPassFilter::new(0.12),
             show_constellations,
             down: None,
             painted_bodies: RefCell::new(Vec::new()),
@@ -278,18 +272,26 @@ impl Widget for SkyViewWidget {
                     let dy = pos.y - down.last.y;
                     let sensitivity = 0.003;
 
-                    let mut new_yaw = self.yaw.get() - dx * sensitivity;
-                    while new_yaw < 0.0 {
-                        new_yaw += 2.0 * PI;
-                    }
-                    while new_yaw >= 2.0 * PI {
-                        new_yaw -= 2.0 * PI;
-                    }
-                    let new_pitch = (self.pitch.get() + dy * sensitivity)
-                        .clamp(-PI / 2.0 + 0.01, PI / 2.0 - 0.01);
-
-                    self.yaw.set(new_yaw);
-                    self.pitch.set(new_pitch);
+                    // Compose camera-local rotations into `view_quat`:
+                    //   - horizontal drag rotates around the camera's
+                    //     local **up** axis (= +Y in view frame),
+                    //   - vertical drag rotates around the camera's
+                    //     local **right** axis (= +X in view frame).
+                    // No gimbal lock anywhere on the sphere -- you can
+                    // sweep the camera straight up through the zenith
+                    // and out the other side and the horizon stays
+                    // correctly oriented.
+                    let q_local_yaw = UnitQuaternion::from_axis_angle(
+                        &Vector3::y_axis(),
+                        -dx * sensitivity,
+                    );
+                    let q_local_pitch = UnitQuaternion::from_axis_angle(
+                        &Vector3::x_axis(),
+                        dy * sensitivity,
+                    );
+                    let local = q_local_yaw * q_local_pitch;
+                    let new_quat = local * self.view_quat.get();
+                    self.view_quat.set(new_quat);
                     agg_gui::animation::request_draw();
                 }
                 down.last = *pos;
@@ -334,19 +336,16 @@ impl Widget for SkyViewWidget {
         let center = Point::new(w / 2.0, h * 0.6);
         let focal_length = (w.min(h)) * 0.9;
 
-        // Apply the user's calibration offset to yaw before smoothing —
-        // a "Calibrate to here" tap on the control panel snapshots the
-        // current yaw into `calibration_yaw`, and we subtract it so the
-        // direction the user is actually pointing the phone ends up as
-        // the rendered "north / centre". Pitch + roll aren't usually
-        // calibrated (the gravity vector already pins them sensibly).
-        let raw_yaw = self.yaw.get() - self.calibration_yaw.get();
-        let (smooth_yaw, smooth_pitch, smooth_roll) = self.filter.update(
-            raw_yaw,
-            self.pitch.get(),
-            self.roll.get(),
-        );
-        let rot = device_orientation_matrix(smooth_yaw, smooth_pitch, smooth_roll);
+        // Build the world→view rotation matrix from the quaternion
+        // state. Calibration applies as an additional rotation around
+        // the world up axis (a compass-offset), composed on the right
+        // so its meaning matches the "subtract this much yaw from the
+        // incoming compass reading" semantics the Calibrate button
+        // implements.
+        let cal_offset = self.calibration_yaw.get();
+        let q_cal = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), -cal_offset);
+        let effective_quat = self.view_quat.get() * q_cal;
+        let rot = effective_quat.to_rotation_matrix().into_inner();
 
         // State cells hold latitude / longitude in **degrees** (user-facing
         // units, matching the city DB and what the status readout displays);

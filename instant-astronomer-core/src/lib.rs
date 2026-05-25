@@ -33,6 +33,7 @@ use agg_gui::layout_props::Insets;
 use agg_gui::text::Font;
 use agg_gui::widgets::{Button, Checkbox, Conditional, Container, FlexColumn, FlexRow, TextField};
 use agg_gui::App;
+use nalgebra::UnitQuaternion;
 
 use crate::widgets::horizon_tape::HorizonTapeWidget;
 use crate::widgets::sky_view::SkyViewWidget;
@@ -62,23 +63,28 @@ pub trait AstronomerPlatform: 'static {
 
 /// Handles to the live state cells the core app exposes to platform shells.
 ///
-/// Shells write into `yaw`/`pitch`/`roll` from device-orientation events,
-/// keep `timestamp_ms` advancing every frame, and may write `latitude` /
+/// Shells write into `view_quat` from device-orientation events (after
+/// converting the Euler triple to a unit quaternion), keep
+/// `timestamp_ms` advancing every frame, and may write `latitude` /
 /// `longitude` from the platform geolocation pipeline. `calibration_yaw`
-/// is a per-session offset applied before the projection so the user can
-/// re-align "what my phone is pointing at" to "what the app shows" — see
-/// [`build_astronomer_app`]'s calibrate button.
+/// is a per-session compass offset the user sets with the Calibrate
+/// button so the rendered sky stays aligned with where they're actually
+/// pointing the phone.
+///
+/// `view_quat` is the world→view rotation. Replaces the previous
+/// `yaw`/`pitch`/`roll` Euler triple to fix gimbal lock when the user
+/// tilts the phone through the zenith/nadir poles.
 pub struct AstronomerHandles {
     pub latitude: Rc<Cell<f64>>,
     pub longitude: Rc<Cell<f64>>,
     pub timestamp_ms: Rc<Cell<i64>>,
-    pub yaw: Rc<Cell<f64>>,
-    pub pitch: Rc<Cell<f64>>,
-    pub roll: Rc<Cell<f64>>,
-    /// Subtracted from `yaw` before the projection runs. Lets the user
-    /// tap a "Calibrate to North" button while pointing roughly at
-    /// north and have the rendered sky snap into alignment with where
-    /// they're actually looking. Stored in **radians**.
+    /// World→view rotation as a unit quaternion. Mouse drag composes
+    /// camera-local rotations into this cell; device-orientation events
+    /// `set()` it directly each time the browser fires.
+    pub view_quat: Rc<Cell<UnitQuaternion<f64>>>,
+    /// Compass-offset calibration in **radians**. Applied as an
+    /// additional rotation around the world up axis so the user can
+    /// re-align "what my phone is pointing at" with the rendered north.
     pub calibration_yaw: Rc<Cell<f64>>,
 }
 
@@ -94,9 +100,8 @@ pub fn build_astronomer_app<P: AstronomerPlatform>(
     let latitude = Rc::new(Cell::new(51.4769));
     let longitude = Rc::new(Cell::new(0.0));
     let timestamp_ms = Rc::new(Cell::new(current_unix_ms()));
-    let yaw = Rc::new(Cell::new(0.0));
-    let pitch = Rc::new(Cell::new(0.0));
-    let roll = Rc::new(Cell::new(0.0));
+    // World→view rotation. Identity = camera looks north along +Z.
+    let view_quat = Rc::new(Cell::new(UnitQuaternion::<f64>::identity()));
     let calibration_yaw = Rc::new(Cell::new(0.0));
     let show_constellations = Rc::new(Cell::new(true));
     // Default to geolocation (the common case on phones). Unchecking
@@ -110,9 +115,7 @@ pub fn build_astronomer_app<P: AstronomerPlatform>(
         latitude: Rc::clone(&latitude),
         longitude: Rc::clone(&longitude),
         timestamp_ms: Rc::clone(&timestamp_ms),
-        yaw: Rc::clone(&yaw),
-        pitch: Rc::clone(&pitch),
-        roll: Rc::clone(&roll),
+        view_quat: Rc::clone(&view_quat),
         calibration_yaw: Rc::clone(&calibration_yaw),
     };
 
@@ -121,13 +124,11 @@ pub fn build_astronomer_app<P: AstronomerPlatform>(
         Rc::clone(&latitude),
         Rc::clone(&longitude),
         Rc::clone(&timestamp_ms),
-        Rc::clone(&yaw),
-        Rc::clone(&pitch),
-        Rc::clone(&roll),
+        Rc::clone(&view_quat),
         Rc::clone(&calibration_yaw),
         Rc::clone(&show_constellations),
     );
-    let tape_widget = HorizonTapeWidget::new(Arc::clone(&font), Rc::clone(&yaw));
+    let tape_widget = HorizonTapeWidget::new(Arc::clone(&font), Rc::clone(&view_quat));
 
     let panel = build_control_panel(
         Arc::clone(&font),
@@ -135,7 +136,7 @@ pub fn build_astronomer_app<P: AstronomerPlatform>(
         Rc::clone(&latitude),
         Rc::clone(&longitude),
         Rc::clone(&timestamp_ms),
-        Rc::clone(&yaw),
+        Rc::clone(&view_quat),
         Rc::clone(&calibration_yaw),
         Rc::clone(&show_constellations),
         Rc::clone(&use_geolocation),
@@ -161,7 +162,7 @@ fn build_control_panel<P: AstronomerPlatform>(
     latitude: Rc<Cell<f64>>,
     longitude: Rc<Cell<f64>>,
     timestamp_ms: Rc<Cell<i64>>,
-    yaw: Rc<Cell<f64>>,
+    view_quat: Rc<Cell<UnitQuaternion<f64>>>,
     calibration_yaw: Rc<Cell<f64>>,
     show_constellations: Rc<Cell<bool>>,
     use_geolocation: Rc<Cell<bool>>,
@@ -206,16 +207,16 @@ fn build_control_panel<P: AstronomerPlatform>(
     )
     .with_state_cell(Rc::clone(&show_constellations));
 
-    // Calibrate-to-north button: snapshots the current live yaw into the
-    // calibration cell so the direction the user is actually pointing
-    // the phone becomes the rendered "north". A second tap with the
-    // phone (or mouse drag) pointing somewhere else re-snaps. Tapping
-    // while already aligned is a no-op.
+    // Calibrate-to-north button: snapshots the current compass heading
+    // derived from `view_quat` into `calibration_yaw`. The projection
+    // subtracts this offset on every frame, so the direction the
+    // user's phone is currently pointing becomes the rendered
+    // "north". A second tap somewhere else re-snaps.
     let calibrate_button = {
-        let yaw = Rc::clone(&yaw);
+        let vq = Rc::clone(&view_quat);
         let cal = Rc::clone(&calibration_yaw);
         Button::new("Calibrate", Arc::clone(&font)).on_click(move || {
-            cal.set(yaw.get());
+            cal.set(view_quat_heading_rad(vq.get()));
             agg_gui::animation::request_draw();
         })
     };
@@ -334,6 +335,20 @@ fn build_control_panel<P: AstronomerPlatform>(
         .with_background(Color::from_rgb8(28, 28, 40))
         .with_border(Color::from_rgb8(50, 50, 70), 1.0)
         .with_inner_padding(Insets::all(12.0))
+}
+
+/// Extract the W3C-convention compass heading (CCW from north, in
+/// radians) from a world→view quaternion. Used by the Calibrate
+/// button and the HorizonTapeWidget so they agree on "which direction
+/// is the camera pointing right now?"
+///
+/// Implementation: the camera-forward direction in **world** coords is
+/// `view_quat.inverse() * (0, 0, 1)`. Heading = `atan2(-x, z)` puts
+/// north (0,0,1)→0, east (1,0,0)→-π/2 (i.e. CCW = +90°/east in W3C
+/// world). Negating recovers W3C alpha.
+pub fn view_quat_heading_rad(view_quat: UnitQuaternion<f64>) -> f64 {
+    let forward_world = view_quat.inverse_transform_vector(&nalgebra::Vector3::new(0.0, 0.0, 1.0));
+    -forward_world.x.atan2(forward_world.z)
 }
 
 /// Current UTC unix time in milliseconds. Wrapped here so the entry points
