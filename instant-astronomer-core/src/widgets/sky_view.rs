@@ -125,11 +125,6 @@ pub struct SkyViewWidget {
     painted_lines: RefCell<Vec<PaintedSegment>>,
     /// Body the user most recently tapped on. Renders as an info card.
     selected: Option<Selection>,
-    /// Whatever is currently under the cursor (no click required). When
-    /// `selected` is None we paint the hovered card instead so moving
-    /// over a constellation line surfaces its name without a click.
-    /// Cleared when the pointer lands on nothing.
-    hovered: RefCell<Option<Selection>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -167,7 +162,6 @@ impl SkyViewWidget {
             painted_bodies: RefCell::new(Vec::new()),
             painted_lines: RefCell::new(Vec::new()),
             selected: None,
-            hovered: RefCell::new(None),
         }
     }
 
@@ -310,7 +304,7 @@ impl SkyViewWidget {
 /// Shortest distance from point `p` to the line segment `a → b`, plus
 /// the closest point on the segment. Used by [`SkyViewWidget::hit_test_tap`]
 /// to resolve taps on constellation line segments.
-fn point_to_segment_distance(p: Point, a: Point, b: Point) -> (f64, Point) {
+pub(super) fn point_to_segment_distance(p: Point, a: Point, b: Point) -> (f64, Point) {
     let abx = b.x - a.x;
     let aby = b.y - a.y;
     let len_sq = abx * abx + aby * aby;
@@ -411,27 +405,11 @@ impl Widget for SkyViewWidget {
             }
             Event::MouseMove { pos } => {
                 let Some(down) = self.down.as_mut() else {
-                    // Idle pointer: hit-test for hover so the user can
-                    // mouse over a constellation line and see its name
-                    // surface as an info card without clicking. Skip
-                    // when a drag is in progress — we don't want the
-                    // tooltip to flicker mid-pan.
-                    let next = self.hit_test_tap(*pos).map(|b| Selection {
-                        name: b.name,
-                        magnitude: b.magnitude,
-                        detail: b.detail,
-                        pos: b.pos,
-                    });
-                    let mut hovered = self.hovered.borrow_mut();
-                    let changed = match (&*hovered, &next) {
-                        (None, None) => false,
-                        (Some(a), Some(b)) => a.name != b.name,
-                        _ => true,
-                    };
-                    if changed {
-                        *hovered = next;
-                        agg_gui::animation::request_draw();
-                    }
+                    // Idle pointer: nothing to do. Constellation
+                    // detection is reticle-driven, not cursor-driven —
+                    // moving the mouse around shouldn't pop tooltips
+                    // (matches how stars work; they're identified by
+                    // the centre reticle, not the cursor).
                     return EventResult::Ignored;
                 };
                 let dx_total = pos.x - down.origin.x;
@@ -711,21 +689,22 @@ impl Widget for SkyViewWidget {
         // is actually inside the ring. Lets the user "aim" the reticle
         // at a bright object and read off what it is, reading just
         // below where their eye already is.
-        hud::paint_centre_reticle(ctx, Arc::clone(&self.font), w, h, centre_alt, &painted);
+        hud::paint_centre_reticle(
+            ctx,
+            Arc::clone(&self.font),
+            w,
+            h,
+            centre_alt,
+            &painted,
+            &painted_lines,
+        );
 
-        // Info card. Drawn last so the panel sits above any
-        // overlapping stars / labels. `selected` (clicked) takes
-        // priority over `hovered` so a sticky pick isn't preempted
-        // by the cursor drifting onto something else. We look the
-        // entry up in the freshly-painted body set so the card
-        // *follows* the body as the user pans; constellation hits
-        // don't live in `painted`, so they fall back to the stored
-        // hit position from the selection.
-        let card_target = self
-            .selected
-            .clone()
-            .or_else(|| self.hovered.borrow().clone());
-        if let Some(sel) = card_target {
+        // Sticky info card from a tap. Bodies re-resolve their
+        // position from this frame's `painted` set so the card
+        // tracks the body as the user pans; constellation hits
+        // don't appear in `painted`, so they fall back to the
+        // stored screen position from the original tap.
+        if let Some(sel) = self.selected.clone() {
             let anchor = painted
                 .iter()
                 .find(|p| p.name == sel.name)

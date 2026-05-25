@@ -15,8 +15,9 @@ use agg_gui::geometry::{Point, Rect};
 use agg_gui::text::Font;
 
 use crate::math::{horizontal_to_cartesian, HorizontalCoords};
+use crate::stars::zodiac_date_range;
 
-use super::{PaintedBody, Selection};
+use super::{point_to_segment_distance, PaintedBody, PaintedSegment, Selection};
 
 use std::f64::consts::PI;
 
@@ -224,6 +225,7 @@ pub(super) fn paint_centre_reticle(
     h: f64,
     _centre_alt: f64,
     painted: &[PaintedBody],
+    painted_lines: &[PaintedSegment],
 ) {
     let centre = Point::new(w / 2.0, h * 0.6);
 
@@ -238,8 +240,8 @@ pub(super) fn paint_centre_reticle(
     ctx.circle(centre.x, centre.y, 1.5);
     ctx.fill();
 
-    // Find the brightest body fully inside the reticle ring; ties
-    // broken toward the nearer body.
+    // Pass 1: bodies. Brightest body inside the reticle ring; ties
+    // broken toward the nearer one.
     let mut best: Option<(f64, &PaintedBody)> = None;
     for body in painted {
         let dx = body.pos.x - centre.x;
@@ -255,22 +257,66 @@ pub(super) fn paint_centre_reticle(
         }
     }
 
-    let Some((_, body)) = best else {
-        return;
+    // Pick what to display: a body wins; if no body, fall through to
+    // the closest constellation line whose closest-point lies inside
+    // the reticle. AABB pre-check skips segments that obviously can't
+    // contain the centre.
+    let (name, detail) = if let Some((_, body)) = best {
+        (body.name.clone(), format!("mag {:+.1}", body.magnitude))
+    } else {
+        let mut best_seg: Option<(f64, &PaintedSegment)> = None;
+        for seg in painted_lines {
+            let min_x = seg.p0.x.min(seg.p1.x) - RETICLE_RADIUS;
+            let max_x = seg.p0.x.max(seg.p1.x) + RETICLE_RADIUS;
+            let min_y = seg.p0.y.min(seg.p1.y) - RETICLE_RADIUS;
+            let max_y = seg.p0.y.max(seg.p1.y) + RETICLE_RADIUS;
+            if centre.x < min_x
+                || centre.x > max_x
+                || centre.y < min_y
+                || centre.y > max_y
+            {
+                continue;
+            }
+            let (dist, _) = point_to_segment_distance(centre, seg.p0, seg.p1);
+            if dist > RETICLE_RADIUS {
+                continue;
+            }
+            match best_seg {
+                Some((d, _)) if dist >= d => {}
+                _ => best_seg = Some((dist, seg)),
+            }
+        }
+        let Some((_, seg)) = best_seg else { return };
+        let detail = match zodiac_date_range(seg.constellation_name) {
+            Some(range) => format!("Zodiac · {range}"),
+            None => String::from("Constellation"),
+        };
+        (seg.constellation_name.to_string(), detail)
     };
 
-    // Paint the name immediately below the reticle so the eye can read
-    // it without moving — proximate to where the user is aiming.
+    paint_reticle_card(ctx, font, w, centre, &name, &detail);
+}
+
+/// Paint the two-line card above the reticle. Pulled out so the
+/// body branch and the constellation branch share the exact same
+/// layout — same fonts, same colors, same anchor — so the user can't
+/// visually tell from the card chrome which kind of hit it was.
+fn paint_reticle_card(
+    ctx: &mut dyn DrawCtx,
+    font: Arc<Font>,
+    w: f64,
+    centre: Point,
+    name: &str,
+    detail: &str,
+) {
     ctx.set_font(font);
     let name_size = 14.0_f64;
     let detail_size = 11.0_f64;
     let pad_x = 12.0_f64;
     let pad_y = 9.0_f64;
     let line_gap = 5.0_f64;
-    let name = body.name.clone();
-    let mag_label = format!("mag {:+.1}", body.magnitude);
     let approx = |s: &str, sz: f64| (s.chars().count() as f64) * sz * 0.6 + pad_x * 2.0;
-    let card_w = approx(&name, name_size).max(approx(&mag_label, detail_size));
+    let card_w = approx(name, name_size).max(approx(detail, detail_size));
     let card_h = name_size + detail_size + line_gap + pad_y * 2.0;
     let card_x = (centre.x - card_w / 2.0).clamp(8.0, w - card_w - 8.0);
     let card_top = centre.y - RETICLE_RADIUS - 6.0;
@@ -289,12 +335,12 @@ pub(super) fn paint_centre_reticle(
     ctx.set_fill_color(Color::from_rgb8(255, 235, 150));
     ctx.set_font_size(name_size);
     let name_baseline = card_y + card_h - pad_y - name_size * 0.25;
-    ctx.fill_text(&name, card_x + pad_x, name_baseline);
+    ctx.fill_text(name, card_x + pad_x, name_baseline);
 
     ctx.set_fill_color(Color::from_rgb8(200, 205, 225));
     ctx.set_font_size(detail_size);
-    let mag_baseline = card_y + pad_y - detail_size * 0.15;
-    ctx.fill_text(&mag_label, card_x + pad_x, mag_baseline);
+    let detail_baseline = card_y + pad_y - detail_size * 0.15;
+    ctx.fill_text(detail, card_x + pad_x, detail_baseline);
 }
 
 /// Paint the projected `alt = 0` horizon line as a dim curve across
