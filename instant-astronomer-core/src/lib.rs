@@ -14,6 +14,7 @@
 //! [`AstronomerPlatform`] trait.
 
 pub mod cities;
+pub mod icons;
 pub mod math;
 pub mod stars;
 
@@ -22,6 +23,7 @@ pub mod widgets {
     pub mod horizon_tape;
     pub mod sky_view;
     pub mod status_text;
+    pub mod wrapping_row;
 }
 
 use std::cell::Cell;
@@ -35,9 +37,11 @@ use agg_gui::widgets::{Button, Checkbox, Conditional, Container, FlexColumn, Fle
 use agg_gui::App;
 use nalgebra::UnitQuaternion;
 
+use crate::icons::{load_icon_font, FA_COMPASS, FA_CROSSHAIRS, FA_EXPAND};
 use crate::widgets::horizon_tape::HorizonTapeWidget;
 use crate::widgets::sky_view::SkyViewWidget;
 use crate::widgets::status_text::StatusText;
+use crate::widgets::wrapping_row::WrappingRow;
 
 /// CascadiaCode bundled into the binary.
 ///
@@ -67,6 +71,12 @@ pub trait AstronomerPlatform: 'static {
     fn local_offset_minutes(&self) -> i32 {
         0
     }
+
+    /// Toggle full-screen presentation. WASM calls
+    /// `Element.requestFullscreen()` / `Document.exitFullscreen()`;
+    /// native shells decide their own meaning (or no-op). Default is
+    /// no-op so shells that can't honour this still compile.
+    fn toggle_fullscreen(&self) {}
 }
 
 /// Handles to the live state cells the core app exposes to platform shells.
@@ -178,6 +188,12 @@ fn build_control_panel<P: AstronomerPlatform>(
     search_status: Rc<std::cell::RefCell<String>>,
 ) -> Container {
     let platform = Rc::new(platform);
+    let icon_font = load_icon_font();
+    // On mobile-touch viewports the action buttons collapse to icon-
+    // only so the bottom bar has any chance of fitting on a 400 px
+    // wide Pixel screen in portrait. Desktop keeps the text labels —
+    // there's plenty of room and the icons alone read as cryptic.
+    let mobile = agg_gui::input_profile::is_mobile_touch();
 
     // Geolocation re-fetch button (works in both modes — even when the
     // user has unchecked "Use geolocation", a quick re-tap fills the
@@ -185,9 +201,12 @@ fn build_control_panel<P: AstronomerPlatform>(
     // lookup).
     let geo_button = {
         let platform = Rc::clone(&platform);
-        Button::new("Locate me", Arc::clone(&font)).on_click(move || {
-            platform.request_geolocation();
-        })
+        let label = if mobile { "" } else { "Locate me" };
+        Button::new(label, Arc::clone(&font))
+            .with_icon(FA_CROSSHAIRS, Arc::clone(&icon_font))
+            .on_click(move || {
+                platform.request_geolocation();
+            })
     };
 
     // Toggle: when checked the app uses the device's reported
@@ -223,10 +242,26 @@ fn build_control_panel<P: AstronomerPlatform>(
     let calibrate_button = {
         let vq = Rc::clone(&view_quat);
         let cal = Rc::clone(&calibration_yaw);
-        Button::new("Calibrate", Arc::clone(&font)).on_click(move || {
-            cal.set(view_quat_heading_rad(vq.get()));
-            agg_gui::animation::request_draw();
-        })
+        let label = if mobile { "" } else { "Calibrate" };
+        Button::new(label, Arc::clone(&font))
+            .with_icon(FA_COMPASS, Arc::clone(&icon_font))
+            .on_click(move || {
+                cal.set(view_quat_heading_rad(vq.get()));
+                agg_gui::animation::request_draw();
+            })
+    };
+
+    // Full-screen toggle. Icon-only (no label) in both modes — the
+    // four-arrow expand glyph is universally recognised. The platform
+    // shell decides what "fullscreen" means: WASM calls the browser
+    // Fullscreen API; native is a no-op today.
+    let fullscreen_button = {
+        let platform = Rc::clone(&platform);
+        Button::new("", Arc::clone(&font))
+            .with_icon(FA_EXPAND, Arc::clone(&icon_font))
+            .on_click(move || {
+                platform.toggle_fullscreen();
+            })
     };
 
     let coord_label = {
@@ -252,13 +287,18 @@ fn build_control_panel<P: AstronomerPlatform>(
         .with_font_size(11.0)
     };
 
-    let row_1 = FlexRow::new()
-        .with_gap(12.0)
+    // WrappingRow instead of FlexRow so the bottom bar flows onto a
+    // second row when it can't fit (e.g. Pixel in portrait). On wider
+    // viewports it stays a single row — no visual change for desktop /
+    // landscape tablets.
+    let row_1 = WrappingRow::new()
+        .with_gap(12.0, 6.0)
         .add(Box::new(geo_checkbox))
         .add(Box::new(geo_button))
         .add(Box::new(calibrate_button))
         .add(Box::new(constellation_checkbox))
-        .add_flex(Box::new(coord_label), 1.0)
+        .add(Box::new(fullscreen_button))
+        .add(Box::new(coord_label))
         .add(Box::new(time_label));
 
     // Shared "do the search now" closure so the Search button, Enter

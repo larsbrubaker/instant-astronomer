@@ -49,6 +49,16 @@ impl AstronomerPlatform for WasmPlatform {
         -(js_sys::Date::new_0().get_timezone_offset() as i32)
     }
 
+    fn toggle_fullscreen(&self) {
+        // Delegate to the JS shell — that side knows what element
+        // wraps the canvas + can wire its own `fullscreenchange`
+        // listener for repaints. We just call the exported helper.
+        let _ = js_sys::eval(
+            "if (document.fullscreenElement) { document.exitFullscreen(); } \
+             else { document.documentElement.requestFullscreen(); }",
+        );
+    }
+
     fn request_geolocation(&self) {
         let Some(window) = web_sys::window() else {
             return;
