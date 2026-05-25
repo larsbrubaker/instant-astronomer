@@ -28,7 +28,6 @@ use agg_gui::geometry::{Point, Rect, Size};
 use agg_gui::text::Font;
 use agg_gui::widget::Widget;
 use std::cell::{Cell, RefCell};
-use std::f64::consts::PI;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -272,30 +271,39 @@ impl Widget for SkyViewWidget {
                     let dy = pos.y - down.last.y;
                     let sensitivity = 0.003;
 
-                    // Horizon-locked FPS-camera composition:
-                    //   - horizontal drag rotates around the **world**
-                    //     up axis (+Y in world frame). Applied on the
-                    //     LEFT so it's expressed in world coordinates
-                    //     independent of how the camera is currently
-                    //     oriented — without this, a previous pitch
-                    //     drag would tilt the camera's local Y and
-                    //     subsequent horizontal drags would induce roll
-                    //     (the "horizon rotates" regression).
-                    //   - vertical drag rotates around the **camera-
-                    //     local** right axis (+X in view frame).
-                    //     Applied on the RIGHT so the pitch is in the
-                    //     camera's current frame.
-                    // No gimbal lock anywhere — quaternions sidestep
-                    // the Euler-angle pole problem entirely.
-                    let q_world_yaw = UnitQuaternion::from_axis_angle(
-                        &Vector3::y_axis(),
-                        -dx * sensitivity,
-                    );
-                    let q_local_pitch = UnitQuaternion::from_axis_angle(
-                        &Vector3::x_axis(),
-                        dy * sensitivity,
-                    );
-                    let new_quat = q_world_yaw * self.view_quat.get() * q_local_pitch;
+                    // Decompose → increment → recompose. The
+                    // previous formulation (`q_world_yaw * view_quat
+                    // * q_local_pitch`) looked roll-free on paper
+                    // but accumulated small roll under sequences of
+                    // diagonal drags (pinned in
+                    // `math::tests::alt_zero_projects_to_horizontal_line_after_drags`).
+                    // Round-tripping through (yaw, pitch) every
+                    // drag guarantees the rebuilt quaternion lives
+                    // in the no-roll subspace exactly — any drift
+                    // gets discarded.
+                    //
+                    // dy convention preserved from the previous
+                    // handler: drag down (positive dy) → look up
+                    // (pitch increases).
+                    let fwd = self
+                        .view_quat
+                        .get()
+                        .inverse_transform_vector(&Vector3::new(0.0, 0.0, 1.0));
+                    let cur_pitch = fwd.y.clamp(-1.0, 1.0).asin();
+                    let cur_yaw = (-fwd.x).atan2(fwd.z);
+                    let new_yaw = cur_yaw + (-dx * sensitivity);
+                    // Clamp a hair shy of ±π/2 so atan2 stays
+                    // well-defined at the next decompose call —
+                    // otherwise the user could pin the camera at
+                    // the singularity and `cur_yaw` becomes noise.
+                    let pitch_cap = std::f64::consts::FRAC_PI_2 - 0.01;
+                    let new_pitch =
+                        (cur_pitch + dy * sensitivity).clamp(-pitch_cap, pitch_cap);
+                    let q_yaw =
+                        UnitQuaternion::from_axis_angle(&Vector3::y_axis(), new_yaw);
+                    let q_pitch =
+                        UnitQuaternion::from_axis_angle(&Vector3::x_axis(), new_pitch);
+                    let new_quat = q_pitch * q_yaw;
                     self.view_quat.set(new_quat);
                     agg_gui::animation::request_draw();
                 }

@@ -338,42 +338,88 @@ mod tests {
         assert!((z_rot.z - 1.0).abs() < 1e-9, "z_rot.z = {}", z_rot.z);
     }
 
-    /// Regression test for the horizon-rotates bug. The drag handler in
-    /// SkyView used to compose yaw as a camera-local rotation, which
-    /// allowed roll to accumulate after any sequence of diagonal /
-    /// alternating horizontal+vertical drags. The fix: yaw must rotate
-    /// around the **world** up axis (Y); only pitch is camera-local
-    /// (around X). With that composition, the world-up vector projected
-    /// into camera space must always have zero camera-right (X) component
-    /// — that's the geometric meaning of "no roll, horizon stays level".
+    /// End-to-end check that the alt=0 great circle projects to a
+    /// strictly horizontal line on screen after any sequence of drags
+    /// composed via SkyView's drag handler. This is the
+    /// "ground plane stays level with the horizon" property the user
+    /// can see: sample the alt=0 ring, project every visible point,
+    /// assert all screen Ys agree.
+    ///
+    /// The previous `q_world_yaw * view_quat * q_local_pitch` form
+    /// looked roll-free in algebra but accumulated small roll under
+    /// diagonal drags (the camera-right axis tilted out of the world
+    /// XZ plane). The fix replays each drag through a yaw/pitch
+    /// decomposition — this test mirrors that exact composition.
     #[test]
-    fn horizon_stays_level_under_diagonal_drags() {
+    fn alt_zero_projects_to_horizontal_line_after_drags() {
         use nalgebra::{UnitQuaternion, Vector3};
-        // World-Y yaw, camera-X pitch — this is the composition rule
-        // the SkyView handler should use.
+        // Decompose-recompose drag composition — same rule the
+        // SkyView mouse handler uses. Any roll that creeps in via
+        // float drift is discarded by the (yaw, pitch) round-trip.
         let apply_drag = |q: UnitQuaternion<f64>, dx: f64, dy: f64| -> UnitQuaternion<f64> {
-            let yaw_w = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), -dx);
-            let pitch_l = UnitQuaternion::from_axis_angle(&Vector3::x_axis(), dy);
-            yaw_w * q * pitch_l
+            let fwd = q.inverse_transform_vector(&Vector3::new(0.0, 0.0, 1.0));
+            let cur_pitch = fwd.y.clamp(-1.0, 1.0).asin();
+            let cur_yaw = (-fwd.x).atan2(fwd.z);
+            let cap = PI / 2.0 - 0.01;
+            let new_yaw = cur_yaw + (-dx);
+            let new_pitch = (cur_pitch + dy).clamp(-cap, cap);
+            let q_yaw = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), new_yaw);
+            let q_pitch = UnitQuaternion::from_axis_angle(&Vector3::x_axis(), new_pitch);
+            q_pitch * q_yaw
         };
-
-        // Walk through a few mixed drags that previously induced roll.
         let mut q = UnitQuaternion::<f64>::identity();
+        // Drags that previously induced roll under the world-yaw /
+        // camera-pitch composition.
         q = apply_drag(q, 0.5, 0.4);
         q = apply_drag(q, -0.3, 0.2);
         q = apply_drag(q, 0.2, -0.1);
         q = apply_drag(q, 0.6, 0.3);
 
-        // Camera-right axis (+X) in world frame. The world-up vector
-        // (+Y world) must have NO projection onto camera-right — that
-        // is, the horizon line as seen by the camera is horizontal.
-        let world_up = Vector3::y();
-        let cam_right_in_world = q * Vector3::x();
-        let roll_component = world_up.dot(&cam_right_in_world);
+        // (a) Geometric: camera-right (camera +X) in world frame must
+        // have zero world-Y component — that's literally "no roll."
+        // `inverse_transform_vector` is the correct way to express
+        // a view-frame vector in world coordinates (NOT `q * X`,
+        // which transforms a world vector into view — the previous
+        // test got this backwards and silently passed).
+        let cam_right_in_world =
+            q.inverse_transform_vector(&nalgebra::Vector3::x());
         assert!(
-            roll_component.abs() < 1e-12,
-            "horizon must stay level — got roll component {roll_component}"
+            cam_right_in_world.y.abs() < 1e-12,
+            "camera right has non-zero world-Y component: {}",
+            cam_right_in_world.y
         );
+
+        // (b) Pixel-level: sample the alt=0 ring and project each
+        // sample exactly like `paint_alt_zero_line` does. All visible
+        // samples must land on the same screen Y.
+        let rot = q.to_rotation_matrix().into_inner();
+        let center_y = 300.0_f64;
+        let focal = 500.0_f64;
+        let mut shared_screen_y: Option<f64> = None;
+        let mut samples_in_front = 0;
+        let step = (2.0_f64).to_radians();
+        let mut az = 0.0_f64;
+        while az < 2.0 * PI {
+            let hc = HorizontalCoords { alt: 0.0, az };
+            let v_cart = horizontal_to_cartesian(hc);
+            let v_rot = rot * v_cart;
+            if v_rot.z > 0.02 {
+                samples_in_front += 1;
+                let sy = center_y + (v_rot.y / v_rot.z) * focal;
+                match shared_screen_y {
+                    None => shared_screen_y = Some(sy),
+                    Some(prev) => assert!(
+                        (sy - prev).abs() < 1e-6,
+                        "alt=0 not horizontal at az={}: y={} vs {}",
+                        az.to_degrees(),
+                        sy,
+                        prev
+                    ),
+                }
+            }
+            az += step;
+        }
+        assert!(samples_in_front > 0, "expected some alt=0 samples to project");
     }
 
     /// Sanity check that incremental quaternion composition produces
