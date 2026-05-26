@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Instant-Astronomer favicon. A waxing crescent moon (≈30% lit) inside
+  a circle outline — same geometry as the in-app moon-phase painter:
+  bright lune carved out of the disc by an ellipse arc, with the
+  full-disc outline ring kept visible so the dark limb is locatable.
+
+  64 × 64 viewBox so the SVG scales cleanly to 16, 32, 64, 180, 512.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Dark backdrop: deep indigo, matches the sky-view backdrop. -->
+  <rect width="64" height="64" rx="12" fill="#0a0a19"/>
+
+  <!-- Moon disc outline. Faint silver-grey so the dark limb is
+       discernible even when the lit portion is thin. -->
+  <circle cx="32" cy="32" r="22"
+          fill="none"
+          stroke="#dcdcef"
+          stroke-width="1.5"
+          stroke-opacity="0.7"/>
+
+  <!--
+    Lit region. Same geometry as `moon_phase::lit_region_path`:
+      - bright limb arc: half of the disc circumference on the
+        Sun-facing side (here, the right);
+      - terminator: an ellipse arc whose semi-minor axis is
+        r·(1 - 2k). For k = 0.3 (waxing crescent), apex of the
+        terminator at x = +0.4·r = +8.8 px right of centre.
+    Implemented as a single closed path: bright limb (right
+    semicircle, r=22) + cubic-approximated ellipse arc back to the
+    starting horn.
+  -->
+  <path d="
+    M 32,10
+    A 22 22 0 0 1 32,54
+    A 8.8 22 0 0 0 32,10
+    Z"
+        fill="#f0eaff"/>
+</svg>

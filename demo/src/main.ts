@@ -90,7 +90,11 @@ async function loadWasm(): Promise<WasmModule> {
   const url = new URL("pkg/instant_astronomer_wasm.js", document.baseURI).href;
   const mod = (await import(/* @vite-ignore */ url)) as WasmModule;
   const wasmUrl = new URL("pkg/instant_astronomer_wasm_bg.wasm", document.baseURI).href;
-  await mod.default(wasmUrl);
+  // wasm-bindgen 0.2.x deprecated the positional-URL init signature
+  // in favour of an options object. Passing `{module_or_path}`
+  // silences the console warning and is the only form supported by
+  // wasm-bindgen 0.3.
+  await mod.default({ module_or_path: wasmUrl });
   return mod;
 }
 

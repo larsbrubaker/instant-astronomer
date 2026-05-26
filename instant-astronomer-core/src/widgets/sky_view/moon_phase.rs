@@ -121,38 +121,20 @@ pub(super) fn fill_moon_phase(
         return;
     }
 
-    // Lit region path. θ runs from -π/2 to +π/2:
-    //   bright arc:  pos + r·(cos θ · sun + sin θ · term)
-    //   terminator:  pos + r·(2k-1)·cos θ · sun + r · sin θ · term
-    // Both share the two "horns" (θ = ±π/2). Sample as a polygon —
-    // agg-gui's path API tessellates it.
-    let (sx, sy) = info.sun_dir;
-    // Terminator direction: rotate sun_dir 90° CCW.
-    let (tx, ty) = (-sy, sx);
-    let k = info.illumination;
-    let term_scale = 2.0 * k - 1.0;
-    const SAMPLES: usize = 48;
+    // Lit region path. See `lit_region_path` for the geometry — kept
+    // factored out so a polygon-area test can verify the lit fraction
+    // matches `k`. (Earlier sign-bug regression had the terminator
+    // bulging the wrong way: gibbous moons rendered as if they were
+    // crescents and vice versa.)
+    let path = lit_region_path(pos, r, info);
     ctx.set_fill_color(bright);
     ctx.begin_path();
-    for i in 0..=SAMPLES {
-        let t = (i as f64) / (SAMPLES as f64);
-        let theta = -std::f64::consts::FRAC_PI_2 + t * std::f64::consts::PI;
-        let x = pos.x + r * (theta.cos() * sx + theta.sin() * tx);
-        let y = pos.y + r * (theta.cos() * sy + theta.sin() * ty);
+    for (i, p) in path.iter().enumerate() {
         if i == 0 {
-            ctx.move_to(x, y);
+            ctx.move_to(p.x, p.y);
         } else {
-            ctx.line_to(x, y);
+            ctx.line_to(p.x, p.y);
         }
-    }
-    for i in 0..=SAMPLES {
-        let t = (i as f64) / (SAMPLES as f64);
-        let theta = std::f64::consts::FRAC_PI_2 - t * std::f64::consts::PI;
-        let cx_local = r * term_scale * theta.cos();
-        let cy_local = r * theta.sin();
-        let x = pos.x + cx_local * sx + cy_local * tx;
-        let y = pos.y + cx_local * sy + cy_local * ty;
-        ctx.line_to(x, y);
     }
     ctx.fill();
     // Outline the full disc so the dark limb is still discernible
@@ -164,10 +146,126 @@ pub(super) fn fill_moon_phase(
     ctx.stroke();
 }
 
+/// Build the polygon vertices for the Moon's lit region as a closed
+/// loop. Two parametric arcs share the same endpoints (the "horns"):
+///
+/// - **Bright limb** (θ ∈ [-π/2, +π/2]): half of the moon's
+///   circumference on the Sun-facing side. Traces from one horn,
+///   through the sub-solar point at `pos + r·sun_dir`, to the other.
+/// - **Terminator** (θ ∈ [+π/2, -π/2]): an ellipse arc whose
+///   semi-major axis is `r` along the terminator direction
+///   (perpendicular to Sun) and whose **signed** semi-minor axis is
+///   `r·(1 - 2k)` along the Sun direction. With `k = illumination`,
+///   apex of the terminator sits at `pos + r·(1-2k)·sun_dir`:
+///   * `k > 0.5` (gibbous): `(1 - 2k) < 0` → apex on the **anti-Sun**
+///     side → terminator bulges into the dark hemisphere → lit
+///     region covers more than half the disc.
+///   * `k = 0.5`: apex at disc centre → terminator is a straight
+///     diameter → exactly half lit.
+///   * `k < 0.5` (crescent): `(1 - 2k) > 0` → apex on the **Sun**
+///     side → terminator carves into the bright hemisphere → lit
+///     region is a thin lune covering less than half.
+///
+/// Earlier code had `(2k - 1)` (inverted sign) and rendered gibbous
+/// as crescent and vice versa — pinned by `polygon_area_matches_k`.
+pub(super) fn lit_region_path(pos: Point, r: f64, info: MoonPhaseInfo) -> Vec<Point> {
+    const SAMPLES: usize = 48;
+    let (sx, sy) = info.sun_dir;
+    // Terminator direction: rotate sun_dir 90° CCW.
+    let (tx, ty) = (-sy, sx);
+    let k = info.illumination;
+    let term_scale = 1.0 - 2.0 * k;
+    let mut path: Vec<Point> = Vec::with_capacity(2 * (SAMPLES + 1));
+    // Bright arc.
+    for i in 0..=SAMPLES {
+        let t = (i as f64) / (SAMPLES as f64);
+        let theta = -std::f64::consts::FRAC_PI_2 + t * std::f64::consts::PI;
+        let x = pos.x + r * (theta.cos() * sx + theta.sin() * tx);
+        let y = pos.y + r * (theta.cos() * sy + theta.sin() * ty);
+        path.push(Point::new(x, y));
+    }
+    // Terminator arc (reverse direction so the polygon is a single
+    // closed loop sharing the horns).
+    for i in 0..=SAMPLES {
+        let t = (i as f64) / (SAMPLES as f64);
+        let theta = std::f64::consts::FRAC_PI_2 - t * std::f64::consts::PI;
+        let cx_local = r * term_scale * theta.cos();
+        let cy_local = r * theta.sin();
+        let x = pos.x + cx_local * sx + cy_local * tx;
+        let y = pos.y + cx_local * sy + cy_local * ty;
+        path.push(Point::new(x, y));
+    }
+    path
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::f64::consts::PI;
+
+    /// Polygon-area sanity: the path returned by `lit_region_path`
+    /// must enclose ~`k`-fraction of the disc. Pins the sign of the
+    /// `term_scale = 1 - 2k` formula — flipping it (the regression
+    /// we just fixed) rendered gibbous moons as crescents and vice
+    /// versa.
+    #[test]
+    fn polygon_area_matches_k() {
+        let r = 100.0_f64;
+        let centre = Point::new(0.0, 0.0);
+        for &k in &[0.0_f64, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0] {
+            let info = MoonPhaseInfo {
+                illumination: k,
+                sun_dir: (1.0, 0.0),
+            };
+            let path = lit_region_path(centre, r, info);
+            // Shoelace formula for signed polygon area; abs() at the
+            // end since winding direction depends on the SAMPLES
+            // direction.
+            let mut area2 = 0.0;
+            for i in 0..path.len() {
+                let a = path[i];
+                let b = path[(i + 1) % path.len()];
+                area2 += a.x * b.y - b.x * a.y;
+            }
+            let area = (area2 * 0.5).abs();
+            let expected = k * PI * r * r;
+            assert!(
+                (area - expected).abs() < 0.005 * PI * r * r,
+                "k={k}: enclosed area {area:.1} should match {expected:.1} (within 0.5% of disc)"
+            );
+        }
+    }
+
+    /// At gibbous phase (k > 0.5), the terminator apex must be on the
+    /// **anti-Sun** side of the disc. This is the geometric fact we
+    /// got wrong before: a positive `term_scale` put the apex on the
+    /// Sun side, so the path enclosed a small lune instead of a
+    /// large bulge.
+    #[test]
+    fn gibbous_terminator_bulges_into_dark_side() {
+        let r = 100.0_f64;
+        let centre = Point::new(0.0, 0.0);
+        // Sun straight up (+y).
+        let info = MoonPhaseInfo {
+            illumination: 0.75,
+            sun_dir: (0.0, 1.0),
+        };
+        let path = lit_region_path(centre, r, info);
+        // The midpoint of the terminator arc (second half of the
+        // path) sits at the apex. For 48 samples per arc, the
+        // terminator midpoint is path[SAMPLES + 1 + 24] (after the
+        // 49 bright-arc points). Index it loosely and look for
+        // the minimum-y point on the second half.
+        let mid = (path.len() / 2) + 24;
+        let apex = path[mid.min(path.len() - 1)];
+        // Sun is at +y, so anti-Sun is -y. Apex y should be
+        // strongly negative.
+        assert!(
+            apex.y < -0.3 * r,
+            "gibbous terminator apex should be on the anti-Sun side: got y={}",
+            apex.y
+        );
+    }
 
     /// Sun and Moon at the same ecliptic longitude (new moon) → 0%
     /// illumination. Sun and Moon opposed (full moon) → 100%.

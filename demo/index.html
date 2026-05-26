@@ -7,6 +7,21 @@
       content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
     />
     <meta name="theme-color" content="#0a0a19" />
+    <!--
+      Favicon set. Modern browsers consume the SVG; older Chromium /
+      Edge versions still request /favicon.ico (multi-res 16+32).
+      Apple devices use `apple-touch-icon.png` for the home-screen
+      tile. PWA install pulls the 192/512 PNGs from the manifest.
+      All variants are the same waxing-crescent geometry the in-app
+      moon-phase painter uses at k≈0.30, so the icon and the
+      rendered Moon match.
+    -->
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="./favicon-32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="./favicon-16.png" />
+    <link rel="alternate icon" href="./favicon.ico" />
+    <link rel="apple-touch-icon" sizes="180x180" href="./apple-touch-icon.png" />
+    <link rel="manifest" href="./site.webmanifest" />
     <title>Instant-Astronomer</title>
     <style>
       /* Bootstrap-only styling. All visible UI (buttons, labels, toggles,
