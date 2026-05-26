@@ -112,6 +112,14 @@ pub struct AstronomerHandles {
     /// swipe to look around. Lets the user opt out when the
     /// magnetometer is mis-calibrated or the phone is on a desk.
     pub use_device_orientation: Rc<Cell<bool>>,
+    /// Smoothed compass heading (radians, W3C-CCW-from-north), or
+    /// `None` until the first device-orientation event arrives. The
+    /// raw magnetometer alpha jitters by several degrees per frame —
+    /// especially near horizontal — so we feed it through a heavy
+    /// low-pass filter (see [`apply_device_orientation`]) before
+    /// composing the view quaternion. Pitch goes through unfiltered
+    /// to keep look-up / look-down snappy.
+    pub filtered_yaw: Rc<Cell<Option<f64>>>,
 }
 
 /// Build the shared Instant-Astronomer widget tree. Both the native and
@@ -152,6 +160,7 @@ pub fn build_astronomer_app<P: AstronomerPlatform>(
     // pans). User can flip the toggle either way.
     let use_device_orientation =
         Rc::new(Cell::new(agg_gui::input_profile::is_mobile_touch()));
+    let filtered_yaw: Rc<Cell<Option<f64>>> = Rc::new(Cell::new(None));
     let search_text = Rc::new(std::cell::RefCell::new(String::new()));
     let search_status = Rc::new(std::cell::RefCell::new(String::from("Type a city to search")));
 
@@ -162,6 +171,7 @@ pub fn build_astronomer_app<P: AstronomerPlatform>(
         view_quat: Rc::clone(&view_quat),
         calibration_yaw: Rc::clone(&calibration_yaw),
         use_device_orientation: Rc::clone(&use_device_orientation),
+        filtered_yaw: Rc::clone(&filtered_yaw),
     };
 
     let sky_widget = SkyViewWidget::new(
@@ -589,6 +599,49 @@ fn build_control_panel<P: AstronomerPlatform>(
 pub fn view_quat_heading_rad(view_quat: UnitQuaternion<f64>) -> f64 {
     let forward_world = view_quat.inverse_transform_vector(&nalgebra::Vector3::new(0.0, 0.0, 1.0));
     -forward_world.x.atan2(forward_world.z)
+}
+
+/// Low-pass coefficient for the compass heading. Each
+/// `deviceorientation` event nudges the filtered yaw by this fraction
+/// of the difference, so a sustained input takes ~`1/κ` events to
+/// converge (≈ 20 events / ~300 ms at 60 Hz). Heavy by design — the
+/// raw magnetometer alpha bounces several degrees per frame on most
+/// phones, especially when the device is held near horizontal, and
+/// the user reported the view "jerking around" without smoothing.
+pub const COMPASS_FILTER_KAPPA: f64 = 0.05;
+
+/// Apply a device-orientation reading to the shared `view_quat`,
+/// smoothing the compass heading heavily and passing the gyroscope-
+/// derived pitch through unfiltered.
+///
+/// Inputs are radians: `yaw_rad` is W3C alpha (CCW from north),
+/// `pitch_rad` is W3C beta minus 90° (so 0 = looking at horizon).
+/// Roll is intentionally dropped — including it adds horizon wobble
+/// without giving the user new control.
+///
+/// The shell calls this on every `deviceorientation` event. The
+/// filter state lives in [`AstronomerHandles::filtered_yaw`] so the
+/// caller doesn't have to thread it through; first call seeds the
+/// filter with the raw value (no startup jerk).
+pub fn apply_device_orientation(
+    handles: &AstronomerHandles,
+    yaw_rad: f64,
+    pitch_rad: f64,
+) {
+    if !handles.use_device_orientation.get() {
+        return;
+    }
+    let next_yaw = match handles.filtered_yaw.get() {
+        Some(prev) => crate::math::lerp_angle_rad(prev, yaw_rad, COMPASS_FILTER_KAPPA),
+        None => yaw_rad,
+    };
+    handles.filtered_yaw.set(Some(next_yaw));
+    let q_yaw =
+        UnitQuaternion::from_axis_angle(&nalgebra::Vector3::y_axis(), next_yaw);
+    let q_pitch =
+        UnitQuaternion::from_axis_angle(&nalgebra::Vector3::x_axis(), pitch_rad);
+    handles.view_quat.set(q_pitch * q_yaw);
+    agg_gui::animation::request_draw();
 }
 
 /// Current UTC unix time in milliseconds. Wrapped here so the entry points

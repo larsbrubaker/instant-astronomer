@@ -66,6 +66,21 @@ pub struct LowPassFilter {
     initialized: bool,
 }
 
+/// Wrap-aware angular linear-interpolation. Moves `from` toward `to`
+/// by fraction `alpha`, taking the **shorter** arc around the unit
+/// circle — so a step from 359° to 1° goes through 0°, not 180°.
+/// Inputs and outputs are in radians.
+pub fn lerp_angle_rad(from: f64, to: f64, alpha: f64) -> f64 {
+    let two_pi = 2.0 * PI;
+    let mut diff = (to - from) % two_pi;
+    if diff < -PI {
+        diff += two_pi;
+    } else if diff > PI {
+        diff -= two_pi;
+    }
+    from + alpha * diff
+}
+
 impl LowPassFilter {
     /// Create a new lowpass telemetry smoothing filter with a given kappa coefficient.
     pub fn new(kappa: f64) -> Self {
@@ -542,6 +557,42 @@ mod tests {
             az += step;
         }
         assert!(samples_in_front > 0, "expected some alt=0 samples to project");
+    }
+
+    /// Wraparound: stepping from 359° toward 1° should take the
+    /// shorter arc (through 0°), not the long way through 180°.
+    /// Pins the modulo trick in `lerp_angle_rad`; without it, a
+    /// compass crossing north would jerk the view 180° around.
+    #[test]
+    fn lerp_angle_takes_shorter_arc_across_zero() {
+        let two_pi = 2.0 * PI;
+        let near_full_circle = two_pi - 0.05; // ≈ 359.4°
+        let just_past_zero = 0.05; // ≈ 2.9°
+        let mid = lerp_angle_rad(near_full_circle, just_past_zero, 0.5);
+        // Expected: ~0° (or equivalently 2π), not π. Allow a small
+        // wrap-tolerance window.
+        let dist_to_zero = mid.min(two_pi - mid).abs();
+        assert!(
+            dist_to_zero < 0.1,
+            "lerp 359°→1° should land near 0°, got {mid:.3} rad"
+        );
+    }
+
+    /// Heavy κ converges slowly. After 20 steps at κ = 0.05 the
+    /// filtered value should land within 64% of the target (geometric
+    /// series). Pins the compass smoothing depth.
+    #[test]
+    fn lerp_angle_low_kappa_converges_slowly() {
+        let target = 1.0_f64;
+        let mut filtered = 0.0_f64;
+        for _ in 0..20 {
+            filtered = lerp_angle_rad(filtered, target, 0.05);
+        }
+        // 1 - 0.95^20 ≈ 0.642
+        assert!(
+            (filtered - 0.642).abs() < 0.02,
+            "20 steps at κ=0.05 should reach ~0.64 of target, got {filtered:.3}"
+        );
     }
 
     /// 12-hour AM/PM conversion. Pin down the four corner cases

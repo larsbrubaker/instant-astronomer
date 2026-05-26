@@ -499,23 +499,13 @@ pub fn on_device_orientation(alpha_deg: f64, beta_deg: f64, gamma_deg: f64) {
     let _ = gamma_deg; // roll wired but unused
     let yaw = alpha_deg.to_radians();
     let pitch = (beta_deg - 90.0).to_radians();
-    let q_yaw = nalgebra::UnitQuaternion::from_axis_angle(&nalgebra::Vector3::y_axis(), yaw);
-    let q_pitch = nalgebra::UnitQuaternion::from_axis_angle(&nalgebra::Vector3::x_axis(), pitch);
-    let view = q_pitch * q_yaw;
+    // `apply_device_orientation` does the heavy-yaw / responsive-pitch
+    // smoothing and honours the "Use compass" toggle.
     HANDLES.with(|h_cell| {
         if let Some(h) = h_cell.borrow().as_ref() {
-            // Honour the "Use compass" toggle — when off, the user
-            // drives the view via swipe/drag and stray device-
-            // orientation events from desktop browsers (or a
-            // mis-calibrated phone magnetometer) must not stomp the
-            // accumulated `view_quat`.
-            if !h.use_device_orientation.get() {
-                return;
-            }
-            h.view_quat.set(view);
+            instant_astronomer_core::apply_device_orientation(h, yaw, pitch);
         }
     });
-    agg_gui::animation::request_draw();
     mark_dirty();
 }
 
