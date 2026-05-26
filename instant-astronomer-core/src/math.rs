@@ -221,8 +221,8 @@ pub fn rise_set_times(
 /// Format a [`RiseSet`] for display in the user's local time. Uses
 /// the platform-reported UTC offset in minutes (DST applied) so the
 /// times read as wall-clock at the observer's location, not UTC.
-/// Examples:
-/// - `"Rises 18:42 · Sets 06:13"`
+/// 12-hour AM/PM format. Examples:
+/// - `"Rises 6:42pm · Sets 6:13am"`
 /// - `"Always up"` / `"Below horizon today"`
 pub fn format_rise_set(rs: RiseSet, offset_minutes: i32) -> String {
     match rs {
@@ -236,13 +236,22 @@ pub fn format_rise_set(rs: RiseSet, offset_minutes: i32) -> String {
     }
 }
 
-/// Format a Unix-ms timestamp as `HH:MM` in the observer's local
-/// (offset-adjusted) wall clock. Wraps cleanly across day boundaries.
+/// Format a Unix-ms timestamp as 12-hour `H:MMam`/`H:MMpm` in the
+/// observer's local (offset-adjusted) wall clock. Wraps cleanly
+/// across day boundaries. Used by the rise/set reticle card so the
+/// times read the way a North-American user expects (`11:23pm`)
+/// instead of the 24-hour `23:23`.
 pub fn format_hhmm(unix_ms: i64, offset_minutes: i32) -> String {
     let local_ms = unix_ms + (offset_minutes as i64) * 60_000;
-    let h = ((local_ms / 3_600_000) % 24 + 24) % 24;
+    let h24 = ((local_ms / 3_600_000) % 24 + 24) % 24;
     let m = ((local_ms / 60_000) % 60 + 60) % 60;
-    format!("{h:02}:{m:02}")
+    let (h12, ampm) = match h24 {
+        0 => (12, "am"),
+        1..=11 => (h24, "am"),
+        12 => (12, "pm"),
+        _ => (h24 - 12, "pm"),
+    };
+    format!("{h12}:{m:02}{ampm}")
 }
 
 /// Invert [`compute_local_sidereal_time`] linearly: find the Unix ms
@@ -533,6 +542,28 @@ mod tests {
             az += step;
         }
         assert!(samples_in_front > 0, "expected some alt=0 samples to project");
+    }
+
+    /// 12-hour AM/PM conversion. Pin down the four corner cases
+    /// (midnight, noon, AM, PM) so a future refactor that swaps
+    /// the format back to 24h has to update this test.
+    #[test]
+    fn format_hhmm_renders_12_hour_ampm() {
+        // 0 offset, pick exact Unix ms at well-known UTC hours.
+        // 2025-01-01T00:00:00Z = 1735689600000 ms
+        let midnight = 1_735_689_600_000_i64;
+        assert_eq!(format_hhmm(midnight, 0), "12:00am");
+        assert_eq!(format_hhmm(midnight + 1 * 3_600_000, 0), "1:00am");
+        assert_eq!(format_hhmm(midnight + 11 * 3_600_000, 0), "11:00am");
+        assert_eq!(format_hhmm(midnight + 12 * 3_600_000, 0), "12:00pm");
+        assert_eq!(format_hhmm(midnight + 13 * 3_600_000, 0), "1:00pm");
+        assert_eq!(
+            format_hhmm(midnight + 23 * 3_600_000 + 23 * 60_000, 0),
+            "11:23pm"
+        );
+        // Offset shifts: PST = -480 min. 03:00 UTC + (-480 min) = 19:00
+        // previous day → 7:00pm.
+        assert_eq!(format_hhmm(midnight + 3 * 3_600_000, -480), "7:00pm");
     }
 
     /// On the equator with the body on the meridian *right now*, the
