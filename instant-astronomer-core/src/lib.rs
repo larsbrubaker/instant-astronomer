@@ -262,6 +262,12 @@ fn build_control_panel<P: AstronomerPlatform>(
         Box::new(
             Button::new("", Arc::clone(&font))
                 .with_icon(FA_MAP_MARKER, Arc::clone(&icon_font))
+                // `with_subtle` + `with_active_fn` is the segmented
+                // toggle look: muted widget_bg (grey) when off, accent
+                // (blue) when on. Without `with_subtle` the inactive
+                // state is still blue and the user can't tell which
+                // toggles are active.
+                .with_subtle()
                 .with_active_fn(move || active_cell.get())
                 .with_compact()
                 .on_click(move || {
@@ -281,11 +287,20 @@ fn build_control_panel<P: AstronomerPlatform>(
         )
     } else {
         let show_search = Rc::clone(&show_search);
+        let toast = Rc::clone(&toast);
         Box::new(
             Checkbox::new("Use geolocation", Arc::clone(&font), use_geolocation.get())
                 .with_state_cell(Rc::clone(&use_geolocation))
                 .on_change(move |checked| {
                     show_search.set(!checked);
+                    crate::toast::show(
+                        &toast,
+                        if checked {
+                            "Using device geolocation"
+                        } else {
+                            "Pick a city to use its coordinates"
+                        },
+                    );
                     agg_gui::animation::request_draw();
                 }),
         )
@@ -303,6 +318,7 @@ fn build_control_panel<P: AstronomerPlatform>(
         Box::new(
             Button::new("", Arc::clone(&font))
                 .with_icon(FA_STAR, Arc::clone(&icon_font))
+                .with_subtle()
                 .with_active_fn(move || active_cell.get())
                 .with_compact()
                 .on_click(move || {
@@ -349,6 +365,7 @@ fn build_control_panel<P: AstronomerPlatform>(
         Box::new(
             Button::new("", Arc::clone(&font))
                 .with_icon(FA_MOBILE, Arc::clone(&icon_font))
+                .with_subtle()
                 .with_active_fn(move || active_cell.get())
                 .with_compact()
                 .on_click(move || {
@@ -460,13 +477,16 @@ fn build_control_panel<P: AstronomerPlatform>(
     // `with_compact()`, so packing them closer keeps the row from
     // wrapping for a few more pixels of viewport width.
     let h_gap = if mobile { 6.0 } else { 12.0 };
+    // Layout: toggles up front as a single group (subtle/grey when
+    // off, accent/blue when on — visually obvious which are active),
+    // then the momentary action buttons, then status text.
     let row_1 = WrappingRow::new()
         .with_gap(h_gap, 6.0)
         .add(geo_toggle)
-        .add(Box::new(geo_button))
-        .add(Box::new(calibrate_button))
         .add(constellation_toggle)
         .add(compass_toggle)
+        .add(Box::new(geo_button))
+        .add(Box::new(calibrate_button))
         .add(Box::new(fullscreen_button))
         .add(Box::new(coord_label))
         .add(Box::new(time_label));
