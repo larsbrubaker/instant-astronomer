@@ -541,6 +541,13 @@ pub(super) fn paint_info_card(
 /// view. No-op when the cell is empty or the toast has fully faded.
 /// `now_ms` is the current Unix epoch ms — passed in so the painter
 /// stays pure (testable without mocking the clock).
+///
+/// Long messages wrap onto multiple lines instead of overflowing
+/// the viewport. Card position is clamped to stay 8 px from either
+/// screen edge — the previous `.min(w - card_w - 8.0)` chain pulled
+/// `card_x` negative when the card was wider than the viewport, so
+/// "Compass on — orientation sensors driving view" hung off the
+/// left side of a Pixel-portrait window.
 pub(super) fn paint_toast(
     ctx: &mut dyn DrawCtx,
     font: Arc<Font>,
@@ -554,19 +561,36 @@ pub(super) fn paint_toast(
     if state.message.is_empty() {
         return;
     }
-    // The fade is animating — request another frame so the toast
-    // actually fades out instead of getting stuck at its current
-    // alpha until something else triggers a repaint.
+    // Fade is animating — request another frame so the toast actually
+    // fades out instead of freezing at its current alpha until
+    // something else triggers a repaint.
     agg_gui::animation::request_draw_without_invalidation();
 
     ctx.set_font(font);
     let text_size = 13.0_f64;
     let pad_x = 14.0_f64;
     let pad_y = 8.0_f64;
-    let approx_w = (state.message.chars().count() as f64) * text_size * 0.6;
-    let card_w = approx_w + pad_x * 2.0;
-    let card_h = text_size + pad_y * 2.0;
-    let card_x = ((w - card_w) * 0.5).max(8.0).min(w - card_w - 8.0);
+    let line_gap = 4.0_f64;
+    let edge_margin = 8.0_f64;
+    let char_w = text_size * 0.6;
+
+    // Available text width inside the card, after edge margins and
+    // card padding. Words wrap to keep every line under this.
+    let max_text_w = (w - 2.0 * edge_margin - 2.0 * pad_x).max(char_w * 4.0);
+    let max_chars_per_line = (max_text_w / char_w).floor().max(4.0) as usize;
+    let lines = wrap_toast_message(&state.message, max_chars_per_line);
+
+    let widest_line = lines
+        .iter()
+        .map(|s| s.chars().count())
+        .max()
+        .unwrap_or(0) as f64;
+    let card_w = (widest_line * char_w + pad_x * 2.0).min(w - 2.0 * edge_margin);
+    let n_lines = lines.len() as f64;
+    let card_h = n_lines * text_size + (n_lines - 1.0).max(0.0) * line_gap + 2.0 * pad_y;
+    // Centre horizontally; `clamp(min, max)` would panic if min > max
+    // (the very-narrow-viewport case), so use a saturating form.
+    let card_x = ((w - card_w) * 0.5).max(edge_margin);
     // Y-up: high y = top of screen. Sit ~32 px below the top edge.
     let card_y = h - card_h - 32.0;
 
@@ -583,6 +607,82 @@ pub(super) fn paint_toast(
 
     ctx.set_fill_color(Color::from_rgba8(255, 240, 200, a));
     ctx.set_font_size(text_size);
-    let baseline = card_y + pad_y - text_size * 0.15;
-    ctx.fill_text(&state.message, card_x + pad_x, baseline);
+    // Y-up: paint lines top-to-bottom, so the first line sits at the
+    // top of the card and subsequent lines step down (lower y).
+    let top_baseline = card_y + card_h - pad_y - text_size * 0.85;
+    for (i, line) in lines.iter().enumerate() {
+        let baseline = top_baseline - (i as f64) * (text_size + line_gap);
+        ctx.fill_text(line, card_x + pad_x, baseline);
+    }
+}
+
+/// Greedy word-wrap on whitespace. A word longer than `max_chars` is
+/// placed on its own line (and overflows the card visually); for
+/// our toast messages — short imperative sentences — that's good
+/// enough and avoids a measure-and-shape loop on the hot paint
+/// path. Char-count is a rough proxy for visual width since the
+/// bundled monospace font (`CascadiaCode`) has near-uniform
+/// advances.
+pub(super) fn wrap_toast_message(message: &str, max_chars: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for word in message.split_whitespace() {
+        if current.is_empty() {
+            current.push_str(word);
+        } else if current.chars().count() + 1 + word.chars().count() <= max_chars {
+            current.push(' ');
+            current.push_str(word);
+        } else {
+            lines.push(std::mem::take(&mut current));
+            current.push_str(word);
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        // All-whitespace or empty message — render as a single blank
+        // line so the card still appears.
+        lines.push(String::new());
+    }
+    lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wrap_toast_message;
+
+    #[test]
+    fn wrap_short_message_one_line() {
+        let lines = wrap_toast_message("Locating", 40);
+        assert_eq!(lines, vec!["Locating".to_string()]);
+    }
+
+    #[test]
+    fn wrap_long_message_breaks_at_spaces() {
+        // 30 chars/line: "Compass on — orientation" = 24, fits.
+        // Adding " sensors" = 32, breaks.
+        let lines =
+            wrap_toast_message("Compass on — orientation sensors driving view", 30);
+        assert!(lines.len() >= 2, "expected wrap, got {lines:?}");
+        for line in &lines {
+            assert!(
+                line.chars().count() <= 30 || !line.contains(' '),
+                "line {line:?} exceeds width without an unbreakable word"
+            );
+        }
+    }
+
+    #[test]
+    fn wrap_preserves_full_message_when_joined() {
+        let msg = "Pick a city to use its coordinates";
+        let lines = wrap_toast_message(msg, 18);
+        assert_eq!(lines.join(" "), msg);
+    }
+
+    #[test]
+    fn wrap_empty_message_yields_blank_line() {
+        let lines = wrap_toast_message("", 40);
+        assert_eq!(lines, vec![String::new()]);
+    }
 }
