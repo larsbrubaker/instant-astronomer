@@ -44,11 +44,28 @@ pub(super) fn moon_illumination(sun: EquatorialCoords, moon: EquatorialCoords) -
 }
 
 /// Bundle illumination + screen-space sun direction for the painter.
-/// The screen direction is computed by rotating the Sun-Moon vector
-/// (in world Y-up horizontal coords) through the camera matrix and
-/// keeping the (x, y) components — perspective doesn't change a
-/// direction's screen orientation, only its magnitude, so we don't
-/// need to perspective-divide.
+///
+/// **The right math here is non-obvious.** The user's bug report was
+/// "the lit side rotates as I move my phone" — symptom of using the
+/// raw camera-frame `(x, y)` of the moon→sun 3-D chord vector. That
+/// approximation only matches the on-screen direction when the moon
+/// is at the principal point; off-centre, the perspective divide
+/// `(x/z, y/z)` skews the projected direction by a factor that
+/// changes with camera orientation.
+///
+/// The exact fix is to apply the Jacobian of the perspective
+/// projection at the moon's view-frame position to the tangent
+/// direction at the moon pointing toward the sun:
+///
+/// 1. `T = S − (S·M̂)M̂` — sun direction projected into the moon's
+///    tangent plane (a unit-celestial-sphere quantity, so the sun's
+///    distance and which hemisphere it's in don't matter).
+/// 2. Rotate `T` and `M` through the camera matrix.
+/// 3. `dx_screen ≈ (T_x − M_x · T_z / M_z) / M_z` — and the same for
+///    `y`. That's the projection Jacobian acting on the tangent.
+///
+/// This matches the actual moon→sun vector on screen at any camera
+/// orientation, so the lit side stays locked to the real sky.
 pub(super) fn moon_phase_info(
     sun: EquatorialCoords,
     moon: EquatorialCoords,
@@ -61,10 +78,24 @@ pub(super) fn moon_phase_info(
     let moon_h = equatorial_to_horizontal(moon, lat_rad, lst_rad);
     let sun_cart = horizontal_to_cartesian(sun_h);
     let moon_cart = horizontal_to_cartesian(moon_h);
-    let dir_world = sun_cart - moon_cart;
-    let dir_view = rot * dir_world;
-    let dx = dir_view.x;
-    let dy = dir_view.y;
+
+    // Tangent direction at the moon pointing toward the sun on the
+    // unit celestial sphere. `moon_cart.dot(&moon_cart) = 1` for the
+    // unit sphere but we divide anyway so the helper survives a
+    // future caller that passes a non-unit Moon vector.
+    let dot = sun_cart.dot(&moon_cart);
+    let moon_norm_sq = moon_cart.dot(&moon_cart);
+    let tangent_world = sun_cart - (dot / moon_norm_sq) * moon_cart;
+    let tangent_view = rot * tangent_world;
+    let moon_view = rot * moon_cart;
+    // Projection Jacobian at the moon, applied to the tangent.
+    // `mz.max(epsilon)` is a guard — the moon is in front of the
+    // camera whenever we're drawing it, so this only matters in
+    // degenerate test setups.
+    let mz = moon_view.z.max(1e-6);
+    let dx = (tangent_view.x - moon_view.x * tangent_view.z / mz) / mz;
+    let dy = (tangent_view.y - moon_view.y * tangent_view.z / mz) / mz;
+
     let len = (dx * dx + dy * dy).sqrt();
     let sun_dir = if len > 1e-9 {
         (dx / len, dy / len)
@@ -265,6 +296,76 @@ mod tests {
             "gibbous terminator apex should be on the anti-Sun side: got y={}",
             apex.y
         );
+    }
+
+    /// The user-visible bug: lit side appeared to rotate when the
+    /// user moved the phone, even though the Sun-Moon geometry in
+    /// the sky is fixed. Symptom of using the camera-frame 3-D chord
+    /// vector instead of the perspective-projected screen direction.
+    ///
+    /// This test fixes the Sun + Moon at known equatorial coords,
+    /// renders the camera at three different yaw angles, and asserts
+    /// `sun_dir` always matches the real screen vector from
+    /// projected-moon to projected-sun (both bodies in front of the
+    /// camera in this setup). If a future refactor reintroduces the
+    /// chord shortcut, the off-axis cases here will fail.
+    #[test]
+    fn sun_dir_matches_perspective_projection_at_multiple_yaws() {
+        use crate::math::{
+            equatorial_to_horizontal, horizontal_to_cartesian,
+            HorizontalCoords,
+        };
+        use nalgebra::{UnitQuaternion, Vector3};
+
+        // Equator observer at LST=0. Moon at alt=45° due north
+        // (RA=0, dec=π/4); sun at alt=30°, az=30° east of north
+        // (RA=0.713, dec=0.848). Both clearly in front of a camera
+        // looking 45° up at any yaw within ±15°.
+        let lat = 0.0_f64;
+        let lst = 0.0_f64;
+        let moon = EquatorialCoords { ra: 0.0, dec: std::f64::consts::FRAC_PI_4 };
+        let sun = EquatorialCoords { ra: 0.713, dec: 0.848 };
+
+        for &yaw_deg in &[-12.0_f64, 0.0, 12.0] {
+            let yaw = yaw_deg.to_radians();
+            let pitch = std::f64::consts::FRAC_PI_4; // 45° up — looks at the moon
+            let q = UnitQuaternion::from_axis_angle(&Vector3::x_axis(), pitch)
+                * UnitQuaternion::from_axis_angle(&Vector3::y_axis(), yaw);
+            let rot = q.to_rotation_matrix().into_inner();
+
+            let info = moon_phase_info(sun, moon, lat, lst, &rot);
+
+            // Compute the "ground truth" — project both bodies and
+            // take the screen-space delta. Same math as
+            // SkyViewWidget::project_horizontal, inlined here so the
+            // test stands on its own.
+            let project = |coords: EquatorialCoords| -> Option<(f64, f64)> {
+                let h = equatorial_to_horizontal(coords, lat, lst);
+                let cart = horizontal_to_cartesian(h);
+                let v = rot * cart;
+                if v.z <= 0.05 {
+                    return None;
+                }
+                Some((v.x / v.z, v.y / v.z))
+            };
+            let m_screen = project(moon).expect("moon in front of camera for this yaw");
+            let s_screen = project(sun).expect("sun in front of camera for this yaw");
+            let dx_true = s_screen.0 - m_screen.0;
+            let dy_true = s_screen.1 - m_screen.1;
+            let len_true = (dx_true * dx_true + dy_true * dy_true).sqrt();
+            let true_dir = (dx_true / len_true, dy_true / len_true);
+
+            let dot = info.sun_dir.0 * true_dir.0 + info.sun_dir.1 * true_dir.1;
+            // dot ≈ 1 ↔ directions aligned. Anything less than ~0.999
+            // means the visible lit limb is mis-rotated by several
+            // degrees — the user can see that.
+            assert!(
+                dot > 0.999,
+                "yaw={yaw_deg}°: sun_dir={:?} doesn't match screen direction {:?} (dot={dot:.4})",
+                info.sun_dir,
+                true_dir
+            );
+        }
     }
 
     /// Sun and Moon at the same ecliptic longitude (new moon) → 0%
