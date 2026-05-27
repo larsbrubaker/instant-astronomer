@@ -479,31 +479,30 @@ pub fn software_keyboard_visible() -> bool {
 /// `deviceorientation` (or `deviceorientationabsolute`) event into the
 /// core's `view_quat` state cell.
 ///
-/// Conversions:
+/// All three W3C Euler angles are forwarded unchanged (just
+/// converted to radians) — the core consumes them as a continuous
+/// rotation matrix rather than decomposing back into a yaw/pitch
+/// pair, so it stays well-behaved across `β = π/2` (the
+/// "horizon" pole of the Tait-Bryan ZXY decomposition where the
+/// previous gamma-dropped path produced a visible jump).
+///
 /// - `alpha_deg`: W3C alpha — CCW from magnetic north. JS hands in
 ///   `event.alpha` on Android-absolute or `360 - webkitCompassHeading`
 ///   on iOS so the value is always W3C-CCW.
-/// - `beta_deg`: front-to-back tilt. 0 = flat face-up; 90 = upright;
-///   180 = face-down. The projection wants `pitch = 0` for "looking
-///   at the horizon", so we subtract 90.
-/// - `gamma_deg`: left-to-right tilt. Ignored for now (gives a stable
-///   horizon even if the user holds the phone slightly rolled); the
-///   value's still part of the conversion so adding roll support is
-///   just a one-line change.
-///
-/// The three Euler angles are composed into a unit quaternion as
-/// `Rx(pitch) * Ry(yaw)` -- world→view -- which is what the
-/// sky-view projection consumes. No gimbal lock at the zenith.
+/// - `beta_deg`: front-to-back tilt. 0 = flat face-up; 90 = upright
+///   facing horizon; 180 = face-down.
+/// - `gamma_deg`: left-to-right tilt. Carries the roll signal that
+///   makes the rotation continuous when the phone tips past
+///   vertical — must be forwarded even when the rendered horizon
+///   line itself ignores roll.
 #[wasm_bindgen]
 pub fn on_device_orientation(alpha_deg: f64, beta_deg: f64, gamma_deg: f64) {
-    let _ = gamma_deg; // roll wired but unused
-    let yaw = alpha_deg.to_radians();
-    let pitch = (beta_deg - 90.0).to_radians();
-    // `apply_device_orientation` does the heavy-yaw / responsive-pitch
-    // smoothing and honours the "Use compass" toggle.
+    let alpha = alpha_deg.to_radians();
+    let beta = beta_deg.to_radians();
+    let gamma = gamma_deg.to_radians();
     HANDLES.with(|h_cell| {
         if let Some(h) = h_cell.borrow().as_ref() {
-            instant_astronomer_core::apply_device_orientation(h, yaw, pitch);
+            instant_astronomer_core::apply_device_orientation(h, alpha, beta, gamma);
         }
     });
     mark_dirty();

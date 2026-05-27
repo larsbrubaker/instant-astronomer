@@ -1,13 +1,21 @@
 //! Rigid-body sensor-fusion for the device-orientation channel.
 //!
-//! Extracted from `lib.rs` to keep that file under the workspace
-//! line-count guardrail. Contains the slerp-weight math, the
-//! `apply_device_orientation` entry point WASM calls on every
-//! `deviceorientation` event, and the `view_quat_heading_rad`
-//! helper the Calibrate button uses to snapshot the current
-//! compass heading.
+//! The `view_quat` target is built from the **full W3C
+//! `(alpha, beta, gamma)` triple** as a continuous rotation matrix,
+//! never decomposed back into a single yaw/pitch pair. That mirrors
+//! Sky Map (sky-map-team/stardroid), which consumes Android's fused
+//! rotation-vector quaternion directly and never touches Euler. The
+//! earlier per-axis path here dropped `gamma`, which made the
+//! Tait-Bryan ZXY decomposition gimbal-lock visible to the user as
+//! a 180° yaw flip when the phone tilted past the horizon
+//! (β = ±π/2).
+//!
+//! Contains the slerp-weight math, the `apply_device_orientation`
+//! entry point WASM calls on every `deviceorientation` event, and
+//! the `view_quat_heading_rad` helper the Calibrate button uses to
+//! snapshot the current compass heading.
 
-use nalgebra::UnitQuaternion;
+use nalgebra::{Matrix3, Rotation3, UnitQuaternion};
 
 use crate::AstronomerHandles;
 
@@ -65,6 +73,49 @@ fn fusion_slerp_weight(
     yaw_share * yaw_weight + (1.0 - yaw_share) * FUSION_TILT_WEIGHT
 }
 
+/// Build the world→view rotation quaternion from a W3C
+/// `(alpha, beta, gamma)` triple **without decomposing into a
+/// single yaw / pitch pair**.
+///
+/// The W3C spec defines the device→earth rotation as
+/// `R = Rz(α) · Rx(β) · Ry(γ)`, where W3C earth coords are
+/// X-east, Y-north, Z-up (right-handed) and W3C device coords are
+/// X-right-of-screen, Y-top-of-screen, Z-out-of-screen.
+///
+/// Our world frame is X-east, Y-up, Z-north — a Y↔Z swap of the
+/// W3C earth frame. We apply that swap inline and project R onto
+/// the three view-basis vectors to get the world→view matrix:
+///
+/// - row 0 = screen-right direction expressed in our world coords
+/// - row 1 = screen-up direction expressed in our world coords
+/// - row 2 = camera-forward direction (= back of phone) in our world
+///
+/// Sky Map's port of the same idea reads the analogous three rows
+/// straight out of Android's `getRotationMatrixFromVector` output;
+/// we compute them analytically because the browser hands us Euler
+/// angles rather than a fused rotation vector. **Critically**: the
+/// matrix is a continuous function of `(α, β, γ)` — including
+/// across `β = ±π/2` where the underlying Tait-Bryan ZXY
+/// decomposition is gimbal-locked. Dropping γ (the previous
+/// behaviour) made that gimbal-lock visible as a 180° yaw jump
+/// when the user tilted the phone past the horizon line.
+fn build_view_quat_w3c(
+    alpha_rad: f64,
+    beta_rad: f64,
+    gamma_rad: f64,
+) -> UnitQuaternion<f64> {
+    let (sa, ca) = alpha_rad.sin_cos();
+    let (sb, cb) = beta_rad.sin_cos();
+    let (sg, cg) = gamma_rad.sin_cos();
+
+    let m = Matrix3::new(
+        cg * ca - sg * sb * sa, -sg * cb, cg * sa + sg * sb * ca,
+        -sa * cb,                sb,       ca * cb,
+        -ca * sg - sa * sb * cg, -cb * cg, ca * sb * cg - sa * sg,
+    );
+    UnitQuaternion::from(Rotation3::from_matrix_unchecked(m))
+}
+
 /// Apply a device-orientation reading to the shared `view_quat` using
 /// rigid-body sensor fusion: slerp the **whole** quaternion toward
 /// the target each event, with a magnitude- and axis-dependent weight.
@@ -88,26 +139,26 @@ fn fusion_slerp_weight(
 /// otherwise it's tilt-like (gravity-driven, follow fast). See
 /// [`fusion_slerp_weight`] for the math.
 ///
-/// Inputs are radians: `yaw_rad` is W3C alpha (CCW from north),
-/// `pitch_rad` is W3C beta minus 90° (so 0 = looking at horizon).
-/// Roll is intentionally dropped.
+/// Inputs are radians and correspond directly to the W3C
+/// `DeviceOrientationEvent` triple: `alpha_rad` (CCW from north
+/// about the up axis), `beta_rad` (front-to-back tilt; π/2 = phone
+/// upright facing horizon), `gamma_rad` (left-to-right tilt /
+/// roll). All three are required for the resulting quaternion to
+/// stay continuous when the phone tilts past the horizon.
 ///
 /// First event after the handle is created snaps to the target so
 /// the view doesn't visibly drift from identity to the device's
 /// real orientation over half a second on startup.
 pub fn apply_device_orientation(
     handles: &AstronomerHandles,
-    yaw_rad: f64,
-    pitch_rad: f64,
+    alpha_rad: f64,
+    beta_rad: f64,
+    gamma_rad: f64,
 ) {
     if !handles.use_device_orientation.get() {
         return;
     }
-    let q_yaw =
-        UnitQuaternion::from_axis_angle(&nalgebra::Vector3::y_axis(), yaw_rad);
-    let q_pitch =
-        UnitQuaternion::from_axis_angle(&nalgebra::Vector3::x_axis(), pitch_rad);
-    let target = q_pitch * q_yaw;
+    let target = build_view_quat_w3c(alpha_rad, beta_rad, gamma_rad);
 
     let next = if handles.fusion_seeded.get() {
         let current = handles.view_quat.get();
@@ -142,6 +193,15 @@ mod tests {
         }
     }
 
+    use std::f64::consts::{FRAC_PI_2, FRAC_PI_3, PI};
+
+    /// Phone-upright reading: β = π/2 means the user is holding the
+    /// phone vertically with the back of the screen pointing at
+    /// the horizon. This is the W3C-spec equivalent of the
+    /// previous `pitch = 0` shorthand and is what the tests below
+    /// use as their "horizon-pointing" baseline.
+    const HORIZON_BETA: f64 = FRAC_PI_2;
+
     /// First `apply_device_orientation` event should snap so the view
     /// doesn't visibly drift from identity to the device's real
     /// orientation over ~500 ms on startup. The user reported this
@@ -149,10 +209,9 @@ mod tests {
     #[test]
     fn apply_device_orientation_snaps_first_event() {
         let h = make_handles();
-        apply_device_orientation(&h, 1.0, 0.5);
+        apply_device_orientation(&h, 1.0, HORIZON_BETA + 0.5, 0.0);
         let q = h.view_quat.get();
-        let expected = UnitQuaternion::from_axis_angle(&nalgebra::Vector3::x_axis(), 0.5)
-            * UnitQuaternion::from_axis_angle(&nalgebra::Vector3::y_axis(), 1.0);
+        let expected = build_view_quat_w3c(1.0, HORIZON_BETA + 0.5, 0.0);
         assert!(
             q.angle_to(&expected) < 1e-9,
             "first event must snap to target, off by {} rad",
@@ -168,12 +227,13 @@ mod tests {
     #[test]
     fn apply_device_orientation_slerps_large_yaw_at_full_weight() {
         let h = make_handles();
-        apply_device_orientation(&h, 1.0, 0.5); // snap
+        // Snap to (α=1.0, looking just below horizon).
+        apply_device_orientation(&h, 1.0, HORIZON_BETA - 0.5, 0.0);
         let q_first = h.view_quat.get();
-        apply_device_orientation(&h, 2.0, 0.5); // 1 rad yaw gap, well above knee
+        // 1 rad yaw gap, well above knee. Same β, same γ → pure yaw.
+        apply_device_orientation(&h, 2.0, HORIZON_BETA - 0.5, 0.0);
         let q_second = h.view_quat.get();
-        let target = UnitQuaternion::from_axis_angle(&nalgebra::Vector3::x_axis(), 0.5)
-            * UnitQuaternion::from_axis_angle(&nalgebra::Vector3::y_axis(), 2.0);
+        let target = build_view_quat_w3c(2.0, HORIZON_BETA - 0.5, 0.0);
         let total = q_first.angle_to(&target);
         let moved = q_first.angle_to(&q_second);
         let ratio = moved / total;
@@ -190,10 +250,12 @@ mod tests {
     #[test]
     fn apply_device_orientation_crushes_small_yaw_jitter() {
         let h = make_handles();
-        apply_device_orientation(&h, 0.0, 0.0); // snap to identity
+        // Seed at horizon-north, slightly off the pole so the rotation
+        // axis between consecutive events is well-defined.
+        apply_device_orientation(&h, 0.0, HORIZON_BETA - 0.2, 0.0);
         let q_seed = h.view_quat.get();
         let jitter = 0.5_f64.to_radians();
-        apply_device_orientation(&h, jitter, 0.0);
+        apply_device_orientation(&h, jitter, HORIZON_BETA - 0.2, 0.0);
         let moved = q_seed.angle_to(&h.view_quat.get());
         let ratio = moved / jitter;
         // (0.5° / 5°)² * 0.30 = 0.003 — view barely moves.
@@ -210,10 +272,10 @@ mod tests {
     #[test]
     fn apply_device_orientation_tracks_small_tilt() {
         let h = make_handles();
-        apply_device_orientation(&h, 0.0, 0.0); // snap to identity
+        apply_device_orientation(&h, 0.0, HORIZON_BETA - 0.2, 0.0); // snap
         let q_seed = h.view_quat.get();
         let tilt = 0.5_f64.to_radians();
-        apply_device_orientation(&h, 0.0, tilt);
+        apply_device_orientation(&h, 0.0, HORIZON_BETA - 0.2 + tilt, 0.0);
         let moved = q_seed.angle_to(&h.view_quat.get());
         let ratio = moved / tilt;
         assert!(
@@ -230,8 +292,76 @@ mod tests {
     fn apply_device_orientation_no_op_when_disabled() {
         let h = make_handles();
         h.use_device_orientation.set(false);
-        apply_device_orientation(&h, 1.0, 0.5);
+        apply_device_orientation(&h, 1.0, HORIZON_BETA + 0.5, 0.0);
         assert!(h.view_quat.get().angle() < 1e-9, "view_quat must not change");
         assert!(!h.fusion_seeded.get(), "must not seed while disabled");
+    }
+
+    /// At the Tait-Bryan ZXY pole β = π/2 only `(α + γ)` is
+    /// physically determined — `α` and `γ` individually can swap by
+    /// any amount as long as their sum stays fixed and represent
+    /// the **same** physical rotation. Real `deviceorientation`
+    /// sensors hit this when the phone is held vertically (i.e.
+    /// camera pointing at the horizon, the app's primary
+    /// orientation), and the user saw it as a 180° jump when the
+    /// previous code dropped γ. The matrix construction must
+    /// produce the same quaternion for any Euler triple that
+    /// represents the same rotation.
+    #[test]
+    fn build_view_quat_w3c_collapses_gimbal_lock_pole() {
+        let q_zero = build_view_quat_w3c(0.0, FRAC_PI_2, 0.0);
+        let q_swapped = build_view_quat_w3c(FRAC_PI_3, FRAC_PI_2, -FRAC_PI_3);
+        let gap = q_zero.angle_to(&q_swapped);
+        assert!(
+            gap < 1e-9,
+            "Euler triples with the same (α+γ) at β=π/2 must yield the same quaternion; gap = {} rad",
+            gap,
+        );
+    }
+
+    /// Continuity test for the horizon-crossing path the user
+    /// reported. As β sweeps through π/2 (phone tilts past
+    /// vertical) the resulting view_quat must change by an amount
+    /// proportional to the physical motion — not flip 180° because
+    /// of a hidden Euler discontinuity.
+    #[test]
+    fn build_view_quat_w3c_smooth_across_horizon() {
+        let q_below = build_view_quat_w3c(0.0, FRAC_PI_2 - 0.001, 0.0);
+        let q_above = build_view_quat_w3c(0.0, FRAC_PI_2 + 0.001, 0.0);
+        let gap = q_below.angle_to(&q_above);
+        // The two readings are 0.002 rad apart physically; allow up to
+        // 10× slack for numerical noise. The previous gamma-dropped
+        // build would have produced ~π rad here.
+        assert!(
+            gap < 0.02,
+            "view_quat must be continuous across β=π/2; got {} rad gap (expected ~0.002)",
+            gap,
+        );
+    }
+
+    /// End-to-end horizon-crossing test through the full fusion
+    /// entry point. Mirrors what the browser actually delivers when
+    /// the user tilts the phone past vertical — and what previously
+    /// produced the visible jump.
+    #[test]
+    fn apply_device_orientation_no_jump_at_horizon() {
+        let h = make_handles();
+        // Snap looking slightly below horizon, north.
+        apply_device_orientation(&h, 0.0, FRAC_PI_2 - 0.05, 0.0);
+        let q_before = h.view_quat.get();
+        // One frame later, β has crossed the pole.
+        apply_device_orientation(&h, 0.0, FRAC_PI_2 + 0.05, 0.0);
+        let q_after = h.view_quat.get();
+        let gap = q_before.angle_to(&q_after);
+        // Physical change is ~0.1 rad; slerp will move ~30% of that,
+        // so a ~0.03 rad delta is expected. Anything close to π
+        // means the old gimbal-lock jump is back.
+        assert!(
+            gap < 0.1,
+            "no jump expected across horizon, got {} rad ({}°)",
+            gap,
+            gap.to_degrees(),
+        );
+        let _ = PI; // keep the import warning quiet
     }
 }
