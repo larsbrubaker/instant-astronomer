@@ -15,7 +15,7 @@ use std::f64::consts::PI;
 use nalgebra::Vector3;
 
 use crate::math::EquatorialCoords;
-use crate::stars::{all_stars, calculate_solar_system_bodies, CONSTELLATION_LINES};
+use crate::stars::{all_stars, calculate_solar_system_bodies, CONSTELLATION_LINES, SPACECRAFT};
 
 /// How a [`SearchTarget`] resolves back to equatorial coordinates.
 #[derive(Debug, Clone)]
@@ -68,12 +68,13 @@ fn solar_category(name: &str) -> &'static str {
 
 /// Search the celestial catalog for objects matching `query`.
 ///
-/// Matches (case-insensitive) across named Solar System bodies, named
-/// stars, and constellation names. Prefix matches rank ahead of substring
-/// matches; within a rank, ordering follows the scan order (bodies, then
-/// stars, then constellations) which roughly tracks how interesting each
-/// hit is. Returns at most [`MAX_RESULTS`] entries. `now_ms` is needed to
-/// place the Solar System bodies so they can be matched by name.
+/// Matches (case-insensitive) across named Solar System bodies, tracked
+/// spacecraft, named stars, and constellation names. Prefix matches rank
+/// ahead of substring matches; within a rank, ordering follows the scan
+/// order (bodies, then spacecraft, then stars, then constellations) which
+/// roughly tracks how interesting each hit is. Returns at most
+/// [`MAX_RESULTS`] entries. `now_ms` is needed to place the Solar System
+/// bodies so they can be matched by name.
 pub fn search_objects(query: &str, now_ms: i64) -> Vec<SearchTarget> {
     let q = query.trim().to_lowercase();
     if q.is_empty() {
@@ -93,6 +94,19 @@ pub fn search_objects(query: &str, now_ms: i64) -> Vec<SearchTarget> {
                     name: body.name.to_string(),
                     kind: SearchKind::SolarSystem,
                     category: solar_category(body.name),
+                },
+            ));
+        }
+    }
+
+    for craft in SPACECRAFT {
+        if let Some(rank) = match_rank(craft.name, &q) {
+            scored.push((
+                rank,
+                SearchTarget {
+                    name: craft.name.to_string(),
+                    kind: SearchKind::Fixed(craft.coords),
+                    category: "Spacecraft",
                 },
             ));
         }
@@ -225,6 +239,26 @@ mod tests {
         let venus = venus.expect("Venus should be found");
         assert_eq!(venus.category, "Planet");
         assert!(matches!(venus.kind, SearchKind::SolarSystem));
+    }
+
+    #[test]
+    fn finds_voyager_spacecraft_by_prefix() {
+        let results = search_objects("voyager", NOW);
+        for expected in ["Voyager 1", "Voyager 2"] {
+            let craft = results
+                .iter()
+                .find(|t| t.name == expected)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "expected {expected} in {:?}",
+                        results.iter().map(|t| &t.name).collect::<Vec<_>>()
+                    )
+                });
+            assert_eq!(craft.category, "Spacecraft");
+            // Fixed snapshot — the finder resolves it without an ephemeris.
+            assert!(matches!(craft.kind, SearchKind::Fixed(_)));
+            assert!(resolve_target_coords(craft, NOW).is_some());
+        }
     }
 
     #[test]

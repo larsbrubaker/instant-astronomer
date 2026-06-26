@@ -138,6 +138,39 @@ fn parse_extended_catalog(csv: &str) -> Vec<Star> {
     out
 }
 
+/// A human-made spacecraft tracked as a fixed-position search target.
+///
+/// The Voyager probes are receding at the edge of the Solar System, so
+/// their apparent position drifts only a few arcminutes per *year* as seen
+/// from Earth — far below the pointing accuracy of a phone finder. We
+/// therefore snapshot an apparent RA/Dec rather than running an ephemeris,
+/// matching how named stars are stored (`SearchKind::Fixed`).
+#[derive(Debug, Clone, Copy)]
+pub struct Spacecraft {
+    pub name: &'static str,
+    pub coords: EquatorialCoords,
+    /// Constellation the probe currently lies in front of (display only).
+    pub constellation: &'static str,
+}
+
+/// Interstellar spacecraft we can point a finder at. Coordinates are
+/// apparent RA/Dec (radians) snapshotted from TheSkyLive ephemerides for
+/// mid-2026; see the per-entry comment for the source values.
+pub const SPACECRAFT: &[Spacecraft] = &[
+    // 17h 16m 47s, +12° 23′ 38″ (Ophiuchus) — 2026-06-19.
+    Spacecraft {
+        name: "Voyager 1",
+        coords: EquatorialCoords { ra: 4.52382, dec: 0.21631 },
+        constellation: "Ophiuchus",
+    },
+    // 20h 16m 16s, −59° 37′ 28″ (Pavo) — 2026-06-19.
+    Spacecraft {
+        name: "Voyager 2",
+        coords: EquatorialCoords { ra: 5.30696, dec: -1.04065 },
+        constellation: "Pavo",
+    },
+];
+
 /// Constellation line connections for the bundled asterisms.
 ///
 /// Eventual scope (per `implementation.md` section 3.3) is the 88 IAU

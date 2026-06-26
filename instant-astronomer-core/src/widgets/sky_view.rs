@@ -16,6 +16,7 @@
 mod geometry;
 mod hud;
 mod moon_phase;
+mod pan;
 mod target_finder;
 
 use geometry::{draw_text, fill_disc, fill_rect, point_to_segment_distance, stroke_segment};
@@ -385,62 +386,27 @@ impl Widget for SkyViewWidget {
                 {
                     down.is_drag = true;
                 }
-                if down.is_drag {
-                    let dx = pos.x - down.last.x;
-                    let dy = pos.y - down.last.y;
-                    // Pixel-accurate sensitivity: drag the screen by N
-                    // pixels and the projected world moves by N pixels.
-                    // Matches `paint`'s focal_length formula so a finger
-                    // dragging a star keeps the star under the finger.
+                if down.is_drag && !self.use_device_orientation.get() {
+                    // Grab-to-pan: rotate the whole sky rigidly so the world
+                    // point under the finger stays pinned to it, the way
+                    // Google Sky Map's manual control does. Uses the same
+                    // pin-hole projection geometry as `paint` (center +
+                    // focal_length); see `pan::drag_view_quat`.
+                    //
+                    // Skipped while the compass (device-orientation) channel
+                    // is driving the view: the phone's sensors aim the
+                    // camera there, so a finger drag must not fight them.
+                    let center =
+                        Point::new(self.bounds.width / 2.0, self.bounds.height * 0.6);
                     let focal_length =
                         (self.bounds.width.min(self.bounds.height)) * 0.9;
-                    let sensitivity = if focal_length > 1.0 {
-                        1.0 / focal_length
-                    } else {
-                        0.003
-                    };
-
-                    // Decompose → increment → recompose. The previous
-                    // `q_world_yaw * view_quat * q_local_pitch`
-                    // formulation looked roll-free on paper but
-                    // accumulated small roll under sequences of
-                    // diagonal drags (pinned in
-                    // `math::tests::alt_zero_projects_to_horizontal_line_after_drags`).
-                    // Round-tripping through (yaw, pitch) every drag
-                    // guarantees the rebuilt quaternion lives in the
-                    // no-roll subspace exactly.
-                    //
-                    // dy convention: drag down (positive dy) → look up
-                    // (pitch increases).
-                    let fwd = self
-                        .view_quat
-                        .get()
-                        .inverse_transform_vector(&Vector3::new(0.0, 0.0, 1.0));
-                    let cur_pitch = fwd.y.clamp(-1.0, 1.0).asin();
-                    let cur_yaw = (-fwd.x).atan2(fwd.z);
-                    let raw_pitch = cur_pitch + dy * sensitivity;
-                    let mut new_yaw = cur_yaw + (-dx * sensitivity);
-                    // Flip-past-zenith. Crossing pitch = +π/2 means the
-                    // user dragged over the top of the sky dome and is
-                    // now looking "back over their shoulder": reflect
-                    // pitch back across the pole and turn yaw by π so
-                    // the heading lands on the other side of north.
-                    // Same trick mirrored for the nadir at -π/2.
-                    use std::f64::consts::PI;
-                    let new_pitch = if raw_pitch > PI / 2.0 {
-                        new_yaw += PI;
-                        PI - raw_pitch
-                    } else if raw_pitch < -PI / 2.0 {
-                        new_yaw += PI;
-                        -PI - raw_pitch
-                    } else {
-                        raw_pitch
-                    };
-                    let q_yaw =
-                        UnitQuaternion::from_axis_angle(&Vector3::y_axis(), new_yaw);
-                    let q_pitch =
-                        UnitQuaternion::from_axis_angle(&Vector3::x_axis(), new_pitch);
-                    let new_quat = q_pitch * q_yaw;
+                    let new_quat = pan::drag_view_quat(
+                        self.view_quat.get(),
+                        down.last,
+                        *pos,
+                        center,
+                        focal_length,
+                    );
                     self.view_quat.set(new_quat);
                     agg_gui::animation::request_draw();
                 }

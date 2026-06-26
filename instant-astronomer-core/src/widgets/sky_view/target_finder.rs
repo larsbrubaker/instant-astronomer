@@ -5,16 +5,18 @@
 //! live direction, then draws:
 //!
 //! * a pulsing highlight ring when the target is on-screen,
-//! * a compact direction arrow hugging the reticle that points toward the
-//!   target (including a "behind you" direction when it's behind the
-//!   camera), and
-//! * a distance gauge ring around the reticle whose fill fraction and
-//!   colour encode how far the view centre is from the target — it fills
-//!   toward a full red ring as you move away.
+//! * a single cohesive "pin" — a ring around the reticle with an arrow
+//!   morphing out of its edge toward the target (including a "behind you"
+//!   direction when it's behind the camera), and
+//! * a proximity meter: a round-capped arc just outside the ring that
+//!   starts invisible when far, grows from the point opposite the arrow
+//!   around both sides, and fully encircles the ring on arrival. As the
+//!   meter's ends close in on the arrow, the arrow retracts into the ring
+//!   so the two never touch.
 //!
 //! Pulled into its own module so `sky_view.rs` stays under the workspace
-//! 800-line guardrail. The geometry helper [`turn_guidance`] is pure and
-//! unit-tested.
+//! 800-line guardrail. The geometry helpers [`turn_guidance`],
+//! [`meter_half_sweep`], and [`arrow_scale`] are pure and unit-tested.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -22,21 +24,46 @@ use std::rc::Rc;
 use agg_gui::color::Color;
 use agg_gui::draw_ctx::DrawCtx;
 use agg_gui::geometry::Point;
+use agg_gui::LineCap;
 use nalgebra::Matrix3;
 
 use crate::math::{equatorial_to_horizontal, horizontal_to_cartesian, HorizontalCoords};
 use crate::search::{resolve_target_coords, SearchTarget};
 
-/// Below this separation the target counts as "found" — the proximity
-/// gauge is full and we drop the direction arrow.
+/// Below this separation the target counts as "found": the meter snaps to a
+/// full ring and the arrow fully retracts into it.
 const FOUND_THRESHOLD_RAD: f64 = 0.035; // ~2°
 
-/// Separation at which the proximity gauge reads empty. Anything wider
-/// than this maps to the same "far" state.
+/// Separation at which the proximity meter reads empty. Anything wider than
+/// this maps to the same "far" state.
 const GAUGE_FULL_SCALE_RAD: f64 = std::f64::consts::FRAC_PI_2; // 90°
 
-/// Radius (logical px) of the proximity gauge ring around the reticle.
-const GAUGE_RADIUS: f64 = 26.0;
+/// Radius (logical px) of the pin's ring centreline around the reticle.
+const RING_RADIUS: f64 = 22.0;
+
+/// Stroke width (logical px) of the pin's ring.
+const RING_STROKE_W: f64 = 3.5;
+
+/// How far the arrow tip extends beyond the ring centreline at full size.
+const ARROW_LEN: f64 = 13.0;
+
+/// Half-width (logical px) of the arrow base at full size.
+const ARROW_HALF_BASE: f64 = 8.0;
+
+/// Stroke width (logical px) of the proximity meter arc.
+const METER_STROKE_W: f64 = 3.0;
+
+/// Gap (logical px) between the ring's outer edge and the meter arc.
+const METER_GAP: f64 = 4.0;
+
+/// Radius (logical px) at which the proximity meter arc is stroked — just
+/// outside the ring.
+const METER_RADIUS: f64 =
+    RING_RADIUS + RING_STROKE_W * 0.5 + METER_GAP + METER_STROKE_W * 0.5;
+
+/// Extra angular clearance (radians) kept between the meter's ends and the
+/// arrow so the round caps never visually kiss the arrow.
+const ARROW_CLEAR_MARGIN: f64 = 0.18;
 
 /// Angular deltas needed to bring a target to the centre of the view.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -139,16 +166,21 @@ pub(super) fn paint(
         v_rot.y.atan2(v_rot.x)
     };
 
-    // Distance, as a colour-coded fill ring hugging the reticle.
-    let prox = proximity(guidance.sep_rad);
-    let color = proximity_color(prox);
-    paint_proximity_gauge(ctx, center, prox, color);
+    // Closeness 0..1. Snap to "arrived" within the found threshold so the
+    // meter completes and the arrow fully retracts instead of hovering at
+    // ~99%.
+    let prox = if guidance.sep_rad < FOUND_THRESHOLD_RAD {
+        1.0
+    } else {
+        proximity(guidance.sep_rad)
+    };
 
-    // Direction arrow tucked just outside the gauge ring, dropped once the
-    // target is essentially centred.
-    if guidance.sep_rad >= FOUND_THRESHOLD_RAD {
-        paint_center_arrow(ctx, center, angle, color);
-    }
+    // The meter grows around the outside as you approach; the pin (ring +
+    // arrow) sits on top so the arrow tip stays crisp over the meter. The
+    // arrow retracts as the meter's ends close in on it.
+    let a_scale = arrow_scale(prox, RING_RADIUS, ARROW_HALF_BASE, ARROW_CLEAR_MARGIN);
+    paint_meter(ctx, center, angle, prox, meter_color(prox));
+    paint_pin(ctx, center, angle, a_scale, accent);
 }
 
 /// Map a great-circle separation to a 0..1 "closeness", saturating at
@@ -157,81 +189,150 @@ fn proximity(sep_rad: f64) -> f64 {
     1.0 - (sep_rad / GAUGE_FULL_SCALE_RAD).clamp(0.0, 1.0)
 }
 
-/// Lerp the gauge colour from red (far) through to green (close).
-fn proximity_color(prox: f64) -> Color {
-    let lerp = |a: f64, b: f64| (a + (b - a) * prox).round() as u8;
-    Color::from_rgb8(lerp(255.0, 120.0), lerp(90.0, 255.0), lerp(90.0, 170.0))
+/// Half-sweep (radians, per side) of the proximity meter for a given
+/// closeness. 0 when far (invisible), `PI` when arrived (a full ring).
+fn meter_half_sweep(prox: f64) -> f64 {
+    prox.clamp(0.0, 1.0) * std::f64::consts::PI
 }
 
-/// Distance gauge: a faint full ring around the reticle with a coloured arc on
-/// top whose sweep grows as the target gets farther from the centre.
-fn paint_proximity_gauge(ctx: &mut dyn DrawCtx, center: Point, prox: f64, color: Color) {
-    use std::f64::consts::PI;
+/// Map closeness 0..1 to a cold→hot colour for the meter: cold blue when far
+/// from the target, ramping through cyan/green/amber to hot red on arrival.
+fn meter_color(prox: f64) -> Color {
+    // Stops along a perceptual cold→hot ramp (closeness, RGB).
+    const STOPS: [(f64, (u8, u8, u8)); 5] = [
+        (0.0, (40, 110, 255)),  // cold blue (far)
+        (0.25, (40, 210, 230)), // cyan
+        (0.5, (70, 220, 90)),   // green
+        (0.75, (240, 200, 60)), // amber
+        (1.0, (255, 70, 60)),   // hot red (on target)
+    ];
+    let p = prox.clamp(0.0, 1.0);
+    let mut i = 0;
+    while i + 1 < STOPS.len() && p > STOPS[i + 1].0 {
+        i += 1;
+    }
+    let (t0, c0) = STOPS[i];
+    let (t1, c1) = STOPS[i + 1];
+    let f = if (t1 - t0).abs() < 1e-9 {
+        0.0
+    } else {
+        (p - t0) / (t1 - t0)
+    };
+    let lerp = |a: u8, b: u8| (a as f64 + (b as f64 - a as f64) * f).round() as u8;
+    Color::from_rgb8(lerp(c0.0, c1.0), lerp(c0.1, c1.1), lerp(c0.2, c1.2))
+}
 
-    ctx.set_line_width(3.0);
-    ctx.set_stroke_color(Color::from_rgba8(255, 255, 255, 38));
+/// Size factor (0..1) for the arrow. 1.0 while the meter's ends are well
+/// clear of the arrow; ramps to 0.0 as the growing meter closes in, so the
+/// meter never touches the arrow. `prox` is closeness 0..1;
+/// `ring_radius`/`half_base` set the arrow's angular width and `margin` is
+/// extra clearance (radians).
+fn arrow_scale(prox: f64, ring_radius: f64, half_base: f64, margin: f64) -> f64 {
+    let prox = prox.clamp(0.0, 1.0);
+    // Angular gap (radians) from each meter end to the arrow centre.
+    let gap = (1.0 - prox) * std::f64::consts::PI;
+    // Arrow's angular half-width at the ring.
+    let aw = (half_base / ring_radius.max(1e-6)).atan();
+    if aw <= 1e-9 {
+        return 1.0;
+    }
+    ((gap - margin) / aw).clamp(0.0, 1.0)
+}
+
+/// Proximity meter: a single round-capped arc stroked just outside the ring.
+/// It is centred on the point opposite the arrow and grows symmetrically as
+/// `prox` rises, closing into a full ring at arrival.
+fn paint_meter(ctx: &mut dyn DrawCtx, center: Point, angle: f64, prox: f64, color: Color) {
+    use std::f64::consts::PI;
+    let half = meter_half_sweep(prox);
+    if half <= 1e-3 {
+        return;
+    }
+    let far = angle + PI; // diametrically opposite the arrow
+    ctx.set_line_cap(LineCap::Round);
+    ctx.set_line_width(METER_STROKE_W);
+    ctx.set_stroke_color(color);
     ctx.begin_path();
-    ctx.circle(center.x, center.y, GAUGE_RADIUS);
+    // `ccw = true` sweeps the *short* arc from `far - half` to `far + half`
+    // (centred on the far point). With `false` the underlying arc generator
+    // pushes the start past the end and draws the complement — the long way
+    // around — which would centre the fill on the arrow and shrink it as you
+    // approach. We want the meter to grow out of the far side toward the
+    // arrow, so sweep the short way.
+    ctx.arc_to(center.x, center.y, METER_RADIUS, far - half, far + half, true);
+    ctx.stroke();
+}
+
+/// Draw the pin: a stroked ring with the arrow morphing out of its edge
+/// toward `angle`. `scale` (0..1) shrinks the arrow back into the ring so it
+/// vanishes flush at 0.
+fn paint_pin(ctx: &mut dyn DrawCtx, center: Point, angle: f64, scale: f64, color: Color) {
+    // Ring.
+    ctx.set_line_cap(LineCap::Round);
+    ctx.set_line_width(RING_STROKE_W);
+    ctx.set_stroke_color(color);
+    ctx.begin_path();
+    ctx.circle(center.x, center.y, RING_RADIUS);
     ctx.stroke();
 
-    let distance = 1.0 - prox;
-    if distance > 0.001 {
-        let start = PI * 0.5; // top of the ring
-        let end = start + distance * 2.0 * PI;
-        ctx.set_stroke_color(color);
-        ctx.begin_path();
-        ctx.arc_to(center.x, center.y, GAUGE_RADIUS, start, end, false);
-        ctx.stroke();
+    let scale = scale.clamp(0.0, 1.0);
+    if scale <= 1e-3 {
+        return;
     }
+
+    // Arrow, as a filled shape whose base is buried in the ring band (so
+    // there is no seam) and whose tip extends outward. Sides curve via
+    // quad_to for a soft morph into the circle.
+    let (c, s) = (angle.cos(), angle.sin());
+    let dir = Point::new(c, s);
+    let perp = Point::new(-s, c);
+
+    let tip_dist = RING_RADIUS + ARROW_LEN * scale;
+    let base_dist = RING_RADIUS - RING_STROKE_W * 0.5; // buried in the ring
+    let half_base = ARROW_HALF_BASE * scale;
+
+    let at = |along: f64, across: f64| {
+        Point::new(
+            center.x + dir.x * along + perp.x * across,
+            center.y + dir.y * along + perp.y * across,
+        )
+    };
+
+    let tip = at(tip_dist, 0.0);
+    let base_l = at(base_dist, half_base);
+    let base_r = at(base_dist, -half_base);
+    // Control points partway out, flared to the arrow's full width, give the
+    // sides a gentle taper that reads as a continuation of the ring.
+    let ctrl_l = at(RING_RADIUS + ARROW_LEN * scale * 0.35, half_base * 0.95);
+    let ctrl_r = at(RING_RADIUS + ARROW_LEN * scale * 0.35, -half_base * 0.95);
+
+    ctx.set_fill_color(color);
+    ctx.begin_path();
+    ctx.move_to(base_l.x, base_l.y);
+    ctx.quad_to(ctrl_l.x, ctrl_l.y, tip.x, tip.y);
+    ctx.quad_to(ctrl_r.x, ctrl_r.y, base_r.x, base_r.y);
+    ctx.line_to(base_l.x, base_l.y);
+    ctx.close_path();
+    ctx.fill();
 }
 
-/// Pulsing ring + tick marks centred on an on-screen target.
+/// Small fixed-size ring centred on an on-screen target that pulses by
+/// fading in and out (no size change).
 fn paint_highlight_ring(ctx: &mut dyn DrawCtx, p: Point, now_ms: i64, color: Color) {
     use std::f64::consts::PI;
-    // Smooth 0..1 pulse on a ~1.1 s cycle.
+    // Smooth 0..1 pulse on a ~1.1 s cycle, mapped to an alpha range that
+    // never fully disappears so the marker stays legible.
     let phase = (now_ms.rem_euclid(1100) as f64) / 1100.0;
     let pulse = 0.5 - 0.5 * (phase * 2.0 * PI).cos();
-    let base_r = 16.0;
-    let r = base_r + pulse * 10.0;
+    let alpha = (0.35 + pulse * 0.65) as f32;
+    let r = 6.0;
     agg_gui::animation::request_draw_without_invalidation();
 
-    ctx.set_stroke_color(color);
+    ctx.set_stroke_color(color.with_alpha(alpha));
     ctx.set_line_width(2.0);
     ctx.begin_path();
     ctx.circle(p.x, p.y, r);
     ctx.stroke();
-
-    // Four short ticks at the cardinal points of the ring.
-    let tick = 6.0;
-    for (dx, dy) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
-        ctx.begin_path();
-        ctx.move_to(p.x + dx * r, p.y + dy * r);
-        ctx.line_to(p.x + dx * (r + tick), p.y + dy * (r + tick));
-        ctx.stroke();
-    }
-}
-
-/// Compact arrow tucked just outside the gauge ring, pointing toward an
-/// off-centre target at `angle` (radians, screen space).
-fn paint_center_arrow(ctx: &mut dyn DrawCtx, center: Point, angle: f64, color: Color) {
-    let (c, s) = (angle.cos(), angle.sin());
-    let inner = GAUGE_RADIUS + 4.0;
-    let length = 14.0;
-    let half = 7.0;
-
-    let tip = Point::new(center.x + c * (inner + length), center.y + s * (inner + length));
-    // Base corners sit on the gauge edge, perpendicular to the direction.
-    let base = Point::new(center.x + c * inner, center.y + s * inner);
-    let left = Point::new(base.x - s * half, base.y + c * half);
-    let right = Point::new(base.x + s * half, base.y - c * half);
-
-    ctx.set_fill_color(color);
-    ctx.begin_path();
-    ctx.move_to(tip.x, tip.y);
-    ctx.line_to(left.x, left.y);
-    ctx.line_to(right.x, right.y);
-    ctx.close_path();
-    ctx.fill();
 }
 
 #[cfg(test)]
@@ -290,5 +391,70 @@ mod tests {
         let b = angular_separation(-0.4, 3.0, 0.1, 0.2);
         assert!((a - b).abs() < 1e-12);
         assert!((0.0..=PI).contains(&a));
+    }
+
+    #[test]
+    fn meter_half_sweep_spans_zero_to_pi() {
+        assert!(meter_half_sweep(0.0).abs() < 1e-12, "far = no sweep");
+        assert!(
+            (meter_half_sweep(1.0) - PI).abs() < 1e-12,
+            "arrived = full half-sweep of PI (a complete ring)"
+        );
+        // Clamped outside 0..1.
+        assert!(meter_half_sweep(-0.5).abs() < 1e-12);
+        assert!((meter_half_sweep(2.0) - PI).abs() < 1e-12);
+        // Monotonic non-decreasing.
+        let mut prev = -1.0;
+        for i in 0..=10 {
+            let v = meter_half_sweep(i as f64 / 10.0);
+            assert!(v >= prev, "half-sweep must be non-decreasing");
+            prev = v;
+        }
+    }
+
+    #[test]
+    fn arrow_is_full_when_meter_far_and_gone_when_arrived() {
+        // Far away: meter invisible, arrow at full size.
+        assert!(
+            (arrow_scale(0.0, RING_RADIUS, ARROW_HALF_BASE, ARROW_CLEAR_MARGIN) - 1.0).abs()
+                < 1e-12,
+            "arrow full when meter is far"
+        );
+        // Arrived: arrow fully retracted so the closed meter never touches it.
+        assert!(
+            arrow_scale(1.0, RING_RADIUS, ARROW_HALF_BASE, ARROW_CLEAR_MARGIN).abs() < 1e-12,
+            "arrow gone on arrival"
+        );
+    }
+
+    #[test]
+    fn meter_color_runs_cold_blue_to_hot_red() {
+        let cold = meter_color(0.0);
+        let hot = meter_color(1.0);
+        // Far end is blue-dominant (cold).
+        assert!(
+            cold.b > cold.r && cold.b > cold.g,
+            "far meter should be cold blue, got {cold:?}"
+        );
+        // Near end is red-dominant (hot).
+        assert!(
+            hot.r > hot.b && hot.r > hot.g,
+            "on-target meter should be hot red, got {hot:?}"
+        );
+    }
+
+    #[test]
+    fn arrow_scale_is_monotonically_non_increasing_in_proximity() {
+        let mut prev = f64::INFINITY;
+        for i in 0..=20 {
+            let prox = i as f64 / 20.0;
+            let s = arrow_scale(prox, RING_RADIUS, ARROW_HALF_BASE, ARROW_CLEAR_MARGIN);
+            assert!(
+                s <= prev + 1e-12,
+                "arrow_scale must not grow as proximity rises: prox={prox}, s={s}, prev={prev}"
+            );
+            assert!((0.0..=1.0).contains(&s), "arrow_scale stays in 0..1");
+            prev = s;
+        }
     }
 }

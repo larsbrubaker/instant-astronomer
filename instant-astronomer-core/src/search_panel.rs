@@ -35,6 +35,12 @@ use crate::search::{search_objects, SearchTarget};
 /// desktop window; on a narrow phone it shrinks to fit.
 const PANEL_MAX_W: f64 = 460.0;
 
+/// Stable id for the search text field on agg-gui's programmatic focus
+/// channel. The entry points that open the overlay call
+/// [`agg_gui::focus::request_focus`] with this so the field is focused (and
+/// the on-screen keyboard rises on mobile) the moment search opens.
+pub(crate) const SEARCH_FIELD_FOCUS_ID: agg_gui::focus::FocusId = 0x5EA8_C4F1;
+
 /// Edge length (logical px) of the small icon buttons in the overlay.
 const SMALL_ICON_PX: f64 = 36.0;
 
@@ -97,6 +103,7 @@ pub(crate) fn build_search_panel(font: Arc<Font>, state: SearchState) -> Box<dyn
         TextField::new(Arc::clone(&font))
             .with_placeholder("Search stars, planets, constellations...")
             .with_text_cell(Rc::clone(&query))
+            .with_focus_id(SEARCH_FIELD_FOCUS_ID)
             .with_padding(6.0)
             .with_min_size(Size::new(0.0, SEARCH_INPUT_H))
             .on_change(move |s| {
@@ -122,7 +129,7 @@ pub(crate) fn build_search_panel(font: Arc<Font>, state: SearchState) -> Box<dyn
         .add(Box::new(results));
     let input_mode = Conditional::new(Rc::clone(&state.no_target), Box::new(input_col));
 
-    let banner = LookingForText::new(Arc::clone(&font), Rc::clone(&state.target));
+    let banner = LookingForText::new(Arc::clone(&font), state.clone());
     let close_locked = {
         let state = state.clone();
         icon_button(&font, &icon_font, FA_TIMES, move || state.close())
@@ -196,30 +203,38 @@ fn icon_button(
 
 /// Wrapping locked-mode label. `StatusText` is intentionally single-line, but
 /// target names need to wrap before they collide with the close button.
+/// Tapping the banner drops the target and returns to the search input.
 struct LookingForText {
     bounds: Rect,
     children: Vec<Box<dyn Widget>>,
     font: Arc<Font>,
-    target: Rc<RefCell<Option<SearchTarget>>>,
+    state: SearchState,
     lines: Vec<String>,
+    /// Whether a press landed inside us (so the release counts as a tap).
+    pressed: bool,
 }
 
 impl LookingForText {
-    fn new(font: Arc<Font>, target: Rc<RefCell<Option<SearchTarget>>>) -> Self {
+    fn new(font: Arc<Font>, state: SearchState) -> Self {
         Self {
             bounds: Rect::default(),
             children: Vec::new(),
             font,
-            target,
+            state,
             lines: Vec::new(),
+            pressed: false,
         }
     }
 
     fn text(&self) -> String {
-        match self.target.borrow().as_ref() {
+        match self.state.target.borrow().as_ref() {
             Some(t) => format!("Looking for: {}", t.name),
             None => String::new(),
         }
+    }
+
+    fn hit(&self, pos: Point) -> bool {
+        pos.x >= 0.0 && pos.x <= self.bounds.width && pos.y >= 0.0 && pos.y <= self.bounds.height
     }
 
     fn wrap_text(&self, text: &str, max_w: f64, font_size: f64) -> Vec<String> {
@@ -326,8 +341,35 @@ impl Widget for LookingForText {
         ctx.restore();
     }
 
-    fn on_event(&mut self, _event: &Event) -> EventResult {
-        EventResult::Ignored
+    fn hit_test(&self, local_pos: Point) -> bool {
+        self.hit(local_pos)
+    }
+
+    fn on_event(&mut self, event: &Event) -> EventResult {
+        match event {
+            Event::MouseDown { pos, button: MouseButton::Left, .. } => {
+                if self.hit(*pos) {
+                    self.pressed = true;
+                    return EventResult::Consumed;
+                }
+                EventResult::Ignored
+            }
+            Event::MouseUp { pos, button: MouseButton::Left, .. } => {
+                if !self.pressed {
+                    return EventResult::Ignored;
+                }
+                self.pressed = false;
+                if self.hit(*pos) {
+                    // Tapping the banner returns to the search input and
+                    // re-focuses it (raising the on-screen keyboard on mobile).
+                    self.state.clear_target();
+                    agg_gui::focus::request_focus(SEARCH_FIELD_FOCUS_ID);
+                    return EventResult::Consumed;
+                }
+                EventResult::Ignored
+            }
+            _ => EventResult::Ignored,
+        }
     }
 }
 
@@ -530,6 +572,38 @@ mod tests {
         );
         // Query is cleared so the list collapses behind the banner.
         assert!(state.query.borrow().is_empty());
+    }
+
+    /// Tapping the "Looking for" banner drops the target and returns the
+    /// overlay to its search-input mode (no_target on, has_target off).
+    #[test]
+    fn tapping_looking_for_banner_returns_to_input() {
+        let font = crate::load_default_font();
+        let state = make_state("");
+        let target = search_objects("sirius", state.timestamp_ms.get())
+            .into_iter()
+            .next()
+            .expect("sirius should resolve to a target");
+        state.select(target);
+        assert!(state.has_target.get(), "precondition: locked mode");
+
+        let mut banner = LookingForText::new(font, state.clone());
+        let size = banner.layout(Size::new(300.0, 100.0));
+        let pos = Point::new(10.0, size.height * 0.5);
+        banner.on_event(&Event::MouseDown {
+            pos,
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        banner.on_event(&Event::MouseUp {
+            pos,
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+
+        assert!(!state.has_target.get(), "tap should drop the target");
+        assert!(state.no_target.get(), "tap should return to input mode");
+        assert!(state.target.borrow().is_none());
     }
 
     /// A tap below the populated rows (empty space) selects nothing.

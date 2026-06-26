@@ -412,6 +412,7 @@ pub(crate) fn build_control_panel<P: AstronomerPlatform>(
                 .on_click(move || {
                     query.borrow_mut().clear();
                     active.set(true);
+                    agg_gui::focus::request_focus(crate::search_panel::SEARCH_FIELD_FOCUS_ID);
                     agg_gui::animation::request_draw();
                 })
         };
