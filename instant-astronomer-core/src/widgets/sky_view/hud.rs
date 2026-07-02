@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use agg_gui::color::Color;
 use agg_gui::draw_ctx::DrawCtx;
-use agg_gui::geometry::{Point, Rect};
+use agg_gui::geometry::{Point, Rect, Size};
 use agg_gui::text::Font;
 
 use crate::math::{horizontal_to_cartesian, HorizontalCoords};
@@ -41,7 +41,7 @@ pub(super) fn paint_horizon_strip(
     center: Point,
     focal_length: f64,
 ) {
-    let ground_h = 36.0_f64;
+    let ground_h = GROUND_BAND_H;
     let horizon_y = ground_h;
 
     ctx.set_fill_color(Color::from_rgba8(4, 4, 10, 220));
@@ -126,6 +126,17 @@ pub(super) fn screen_centre_altitude(rot: &nalgebra::Matrix3<f64>) -> f64 {
     (cam_forward.y / len).asin()
 }
 
+/// Height of the ground band painted across the sky view's bottom by
+/// `paint_horizon_strip` — floating overlays (the reticle info card)
+/// treat it as reserved space so they never render on top of the
+/// cardinal tape.
+pub(super) const GROUND_BAND_H: f64 = 36.0;
+
+/// Width of the right-edge strip the altitude ladder occupies (strip +
+/// its 8px edge gap + the chevron poking out the left side). Floating
+/// overlays keep clear of it.
+pub(super) const ALT_LADDER_STRIP_W: f64 = 30.0 + 8.0 + 6.0;
+
 /// Paint a small vertical pitch tape along the right edge of the
 /// sky view. Tick marks every 10° from −90° (nadir) to +90°
 /// (zenith) with major labels every 30°. The current centre
@@ -138,9 +149,8 @@ pub(super) fn paint_altitude_ladder(
     centre_alt: f64,
 ) {
     let strip_w = 30.0_f64;
-    let ground_h = 36.0_f64;
     let ladder_top = h - 12.0;
-    let ladder_bottom = ground_h + 12.0;
+    let ladder_bottom = GROUND_BAND_H + 12.0;
     let ladder_h = (ladder_top - ladder_bottom).max(40.0);
     let x0 = w - strip_w - 8.0;
 
@@ -300,72 +310,66 @@ pub(super) fn paint_centre_reticle(
         (seg.constellation_name.to_string(), vec![detail])
     };
 
-    paint_reticle_card(ctx, font, w, centre, &name, &details);
+    paint_reticle_card(ctx, font, w, h, centre, &name, &details);
 }
 
-/// Paint the multi-line card above the reticle. Pulled out so the
+/// The reticle info card's chrome. Layout/measurement/placement all come
+/// from `agg_gui::card`; only the colors are ours.
+fn reticle_card_style() -> agg_gui::card::CardStyle {
+    agg_gui::card::CardStyle {
+        anchor_clearance: RETICLE_RADIUS + 6.0,
+        bg: Color::from_rgba8(15, 20, 38, 230),
+        border_color: Color::from_rgba8(255, 215, 90, 180),
+        title_color: Color::from_rgb8(255, 235, 150),
+        detail_color: Color::from_rgb8(200, 205, 225),
+        ..agg_gui::card::CardStyle::default()
+    }
+}
+
+/// Paint the multi-line card next to the reticle. Pulled out so the
 /// body branch and the constellation branch share the exact same
 /// layout — same fonts, same colors, same anchor — so the user can't
 /// visually tell from the card chrome which kind of hit it was. The
 /// detail array supplies any number of secondary lines (magnitude,
 /// rise/set, zodiac date range) painted top-to-bottom underneath
 /// the name.
+///
+/// Placement is `agg_gui::card`'s job: measured with real text metrics,
+/// detail lines wrapped to the safe width, anchored to the reticle
+/// (below it, flipping above when the bottom lacks room), and clamped
+/// clear of every reserved strip — the mobile left button rail and the
+/// on-screen keyboard arrive via `overlay_insets`, and the sky view adds
+/// its own altitude ladder and ground band. The card can no longer end
+/// up half-hidden under any of them (the "Algenib card cut off behind
+/// the rail" bug).
 fn paint_reticle_card(
     ctx: &mut dyn DrawCtx,
     font: Arc<Font>,
     w: f64,
+    h: f64,
     centre: Point,
     name: &str,
     details: &[String],
 ) {
-    ctx.set_font(font);
-    let name_size = 14.0_f64;
-    let detail_size = 11.0_f64;
-    let pad_x = 12.0_f64;
-    let pad_y = 9.0_f64;
-    let line_gap = 4.0_f64;
-    let approx = |s: &str, sz: f64| (s.chars().count() as f64) * sz * 0.6 + pad_x * 2.0;
-    let mut card_w = approx(name, name_size);
-    for d in details {
-        card_w = card_w.max(approx(d, detail_size));
-    }
-    let detail_lines = details.len();
-    let detail_block_h = if detail_lines == 0 {
-        0.0
-    } else {
-        detail_lines as f64 * detail_size + (detail_lines as f64 - 1.0).max(0.0) * line_gap
+    let container = Size::new(w, h);
+    // Frame-wide reserved chrome (rail, on-screen keyboard) is folded in
+    // by `paint_anchored`; the sky only declares its own internal strips.
+    let extra = agg_gui::layout_props::Insets {
+        right: ALT_LADDER_STRIP_W,
+        bottom: GROUND_BAND_H,
+        ..agg_gui::layout_props::Insets::default()
     };
-    let card_h = name_size + line_gap + detail_block_h + pad_y * 2.0;
-    let card_x = (centre.x - card_w / 2.0).clamp(8.0, w - card_w - 8.0);
-    let card_top = centre.y - RETICLE_RADIUS - 6.0;
-    let card_y = (card_top - card_h).max(8.0);
 
-    ctx.set_fill_color(Color::from_rgba8(15, 20, 38, 230));
-    ctx.begin_path();
-    ctx.rounded_rect(card_x, card_y, card_w, card_h, 7.0);
-    ctx.fill();
-    ctx.set_stroke_color(Color::from_rgba8(255, 215, 90, 180));
-    ctx.set_line_width(1.0);
-    ctx.begin_path();
-    ctx.rounded_rect(card_x, card_y, card_w, card_h, 7.0);
-    ctx.stroke();
-
-    // Y-up: text baselines measured from the TOP of the card down so
-    // the name reads first.
-    ctx.set_fill_color(Color::from_rgb8(255, 235, 150));
-    ctx.set_font_size(name_size);
-    let name_baseline = card_y + card_h - pad_y - name_size * 0.25;
-    ctx.fill_text(name, card_x + pad_x, name_baseline);
-
-    ctx.set_fill_color(Color::from_rgb8(200, 205, 225));
-    ctx.set_font_size(detail_size);
-    for (i, line) in details.iter().enumerate() {
-        // First detail line sits just below the name; subsequent lines
-        // descend by detail_size + line_gap each.
-        let dy = (i as f64) * (detail_size + line_gap);
-        let baseline = name_baseline - name_size - line_gap - dy;
-        ctx.fill_text(line, card_x + pad_x, baseline);
-    }
+    agg_gui::card::paint_anchored(
+        ctx,
+        font,
+        &reticle_card_style(),
+        container,
+        centre,
+        extra,
+        name,
+        details,
+    );
 }
 
 /// Paint the projected `alt = 0` horizon line as a dim curve across
@@ -391,7 +395,7 @@ pub(super) fn paint_alt_zero_line(
     // Skip everything below the painted ground band (paint_horizon_strip
     // covers y=0..36) and above the top edge, so the line doesn't
     // extend into UI surfaces.
-    let ground_h = 36.0;
+    let ground_h = GROUND_BAND_H;
     let clip_y = |y: f64| -> bool { y >= ground_h && y <= h - 6.0 };
 
     let mut prev: Option<Point> = None;

@@ -253,7 +253,10 @@ pub fn build_astronomer_app<P: AstronomerPlatform>(
     // the top on both form factors.
     let mut stack = Stack::new().add(Box::new(sky_widget));
     if let Some(rail) = panel.left_rail {
-        stack = stack.add_aligned(rail);
+        // ReserveInset publishes the rail's strip to agg-gui's overlay
+        // insets so floating content (the reticle info card) never
+        // renders half-hidden underneath it.
+        stack = stack.add_aligned(Box::new(agg_gui::widgets::ReserveInset::left(rail)));
     }
     stack = stack.add_aligned(search_panel);
     let sky_area: Box<dyn agg_gui::widget::Widget> = Box::new(stack);
@@ -265,4 +268,51 @@ pub fn build_astronomer_app<P: AstronomerPlatform>(
         .add(Box::new(panel.bottom));
 
     (App::new(Box::new(root)), handles)
+}
+#[cfg(test)]
+mod overlay_inset_tests {
+    use std::rc::Rc;
+
+    use agg_gui::{Modifiers, MouseButton};
+
+    struct NoopPlatform;
+    impl crate::AstronomerPlatform for NoopPlatform {
+        fn request_geolocation(&self, _apply: Rc<dyn Fn(f64, f64)>) {}
+    }
+
+    /// The mobile left rail must reserve its strip with agg-gui's overlay
+    /// insets whenever it is visible, so the reticle info card (placed via
+    /// `agg_gui::card`) never renders half-hidden underneath it — the
+    /// "Algenib card cut off behind the rail" phone bug.
+    #[test]
+    fn visible_mobile_rail_reserves_left_inset_for_overlays() {
+        agg_gui::input_profile::set_input_profile(agg_gui::input_profile::InputProfile::MobileAndroid);
+        agg_gui::ux_scale::set_ux_scale(1.7);
+        let (mut app, _handles) =
+            crate::build_astronomer_app(crate::load_default_font(), NoopPlatform);
+
+        let viewport = agg_gui::geometry::Size::new(390.0 * 1.7, 700.0 * 1.7);
+        agg_gui::overlay_insets::begin_frame();
+        app.layout(viewport);
+        assert_eq!(
+            agg_gui::overlay_insets::current().left,
+            0.0,
+            "rail starts hidden — nothing reserved"
+        );
+
+        // Tap empty sky to show the control rail, then re-lay out.
+        app.on_mouse_down(40.0, 900.0, MouseButton::Left, Modifiers::default());
+        app.on_mouse_up(40.0, 900.0, MouseButton::Left, Modifiers::default());
+        agg_gui::overlay_insets::begin_frame();
+        app.layout(viewport);
+
+        let left = agg_gui::overlay_insets::current().left;
+        assert!(
+            (40.0..80.0).contains(&left),
+            "visible rail must reserve its strip (got left={left})"
+        );
+
+        agg_gui::ux_scale::set_ux_scale(1.0);
+        agg_gui::input_profile::set_input_profile(agg_gui::input_profile::InputProfile::Desktop);
+    }
 }
