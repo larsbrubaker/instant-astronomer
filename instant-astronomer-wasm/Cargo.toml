@@ -15,21 +15,12 @@ crate-type = ["cdylib", "rlib"]
 instant-astronomer-core = { path = "../instant-astronomer-core" }
 agg-gui = { workspace = true }
 demo-wgpu = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-web-time = { workspace = true }
-nalgebra = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
-wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
-console_error_panic_hook = "0.1"
-wgpu = { version = "29", default-features = false, features = ["wgsl", "webgl"] }
 web-sys = { version = "0.3", features = [
     "Window",
-    "Document",
-    "HtmlCanvasElement",
     "Navigator",
     "Geolocation",
     "Position",

@@ -84,12 +84,13 @@ pub(crate) fn build_control_panel<P: AstronomerPlatform>(
     let geo_button = {
         let platform = Rc::clone(&platform);
         let toast = Rc::clone(&toast);
+        let apply = geolocation_apply(&latitude, &longitude, &toast);
         let label = if mobile { "" } else { "Locate me" };
         let mut b = Button::new(label, Arc::clone(&font))
             .with_icon(FA_CROSSHAIRS, Arc::clone(&icon_font))
             .on_click(move || {
                 crate::toast::show(&toast, "Locating…");
-                platform.request_geolocation();
+                platform.request_geolocation(Rc::clone(&apply));
             });
         if mobile {
             b = b
@@ -516,4 +517,50 @@ pub(crate) fn build_control_panel<P: AstronomerPlatform>(
         .with_inner_padding(Insets::all(12.0));
 
     ControlPanel { left_rail, bottom }
+}
+
+/// Build the callback a platform's geolocation lookup invokes with a fix.
+/// Owns every app-state effect of a successful locate — writing the live
+/// latitude/longitude cells, confirming via toast, and requesting a
+/// redraw — so platform implementations stay pure I/O.
+fn geolocation_apply(
+    latitude: &Rc<Cell<f64>>,
+    longitude: &Rc<Cell<f64>>,
+    toast: &crate::toast::ToastCell,
+) -> Rc<dyn Fn(f64, f64)> {
+    let latitude = Rc::clone(latitude);
+    let longitude = Rc::clone(longitude);
+    let toast = Rc::clone(toast);
+    Rc::new(move |lat_deg: f64, lng_deg: f64| {
+        latitude.set(lat_deg);
+        longitude.set(lng_deg);
+        crate::toast::show(&toast, "Location updated");
+        agg_gui::animation::request_draw();
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A geolocation fix routed through the apply callback must land in
+    /// the same cells the sky projection reads — regression test for the
+    /// old design where platform shells wrote coordinates into private
+    /// cells nothing read, so the Locate button never moved the sky.
+    #[test]
+    fn geolocation_apply_updates_the_live_coordinate_cells() {
+        let latitude = Rc::new(Cell::new(51.4769));
+        let longitude = Rc::new(Cell::new(0.0));
+        let toast = crate::toast::new_toast_cell();
+
+        let apply = geolocation_apply(&latitude, &longitude, &toast);
+        apply(33.6846, -117.8265);
+
+        assert_eq!(latitude.get(), 33.6846);
+        assert_eq!(longitude.get(), -117.8265);
+        assert!(
+            toast.borrow().is_some(),
+            "a successful locate should confirm via toast"
+        );
+    }
 }

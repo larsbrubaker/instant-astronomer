@@ -3,12 +3,17 @@
 ## Architecture invariants
 
 - 3-crate workspace: `instant-astronomer-core` (math, city DB, widgets,
-  shared app builder), `instant-astronomer-native` (winit + wgpu present
-  surface), `instant-astronomer-wasm` (cdylib + web-sys + WebGL2 present
-  surface). Mirrors the Marbles / Solitaire shell pattern.
-- **Single application, two host adapters.** `instant-astronomer-core`
-  is the entire visible app. Native and WASM are platform shells that
-  create a window/canvas, present the agg-gui paint, and forward events.
+  shared app builder), `instant-astronomer-native` (desktop shim),
+  `instant-astronomer-wasm` (browser shim).
+- **Single application, two minimal host shims.** `instant-astronomer-core`
+  is the entire visible app. The window/canvas, wgpu surface, event loop,
+  and ALL input forwarding (pointer, wheel, keyboard, clipboard, DPR,
+  client-platform detection) live in the shared shells
+  `demo_wgpu::native_shell` / `demo_wgpu::web_shell` (agg-gui workspace).
+  The shims contain ONLY app-specific glue: the `AstronomerPlatform`
+  impl, sensor/geolocation exports, and the per-frame clock tick. Do not
+  add generic plumbing to a shim — extend the shared shells instead so
+  every agg-gui app inherits it.
 - `instant-astronomer-core` MUST stay `wasm32`-clean. No `tokio`, no
   `winit`, no `wgpu` calls. Capabilities are injected via traits
   (`AstronomerPlatform::request_geolocation` today; more to come).
@@ -19,9 +24,12 @@
   missing, add it to `../agg-gui/agg-gui/src/…` first.
 - **No HTML/CSS UI in the WASM shell.** The browser side may own a single
   `<canvas id="astronomer-canvas">`, request `navigator.geolocation`,
-  subscribe to `deviceorientation` events, and forward results into Rust
-  via `wasm-bindgen` exports. It must not draw buttons / labels / toggles
-  / status text — those all live in `instant-astronomer-core`.
+  subscribe to `deviceorientation` events (the iOS permission gate is the
+  one allowed DOM overlay), and forward results into Rust via
+  `wasm-bindgen` exports. It must not draw buttons / labels / toggles
+  / status text — those all live in `instant-astronomer-core`. Input
+  and the frame loop are Rust-owned (`web_shell`); `main.ts` must not
+  wire pointer/keyboard listeners or drive `requestAnimationFrame`.
 - **Typography / icons.** Render through agg-gui text widgets. Font
   Awesome icons (when added) load through agg-gui's icon-font path. If
   text scaling is insufficient on HiDPI / mobile, fix it in agg-gui, not

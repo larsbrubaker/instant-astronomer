@@ -140,13 +140,14 @@ pub(crate) fn build_search_panel(font: Arc<Font>, state: SearchState) -> Box<dyn
         .add(close_locked);
     let locked_mode = Conditional::new(Rc::clone(&state.has_target), Box::new(locked_row));
 
-    // Only one of the two modes is ever visible, so use no gap between
-    // them — otherwise `FlexColumn` reserves `gap` px above the visible
-    // mode for the collapsed one, showing up as dead margin at the top.
+    // The two modes are alternatives (never shown together), so no gap.
     let inner = FlexColumn::new()
         .add(Box::new(input_mode))
         .add(Box::new(locked_mode));
 
+    // Symmetric vertical padding keeps the text field vertically centred
+    // in the panel while no results are showing (the empty results list
+    // reports itself invisible, so `FlexColumn` reserves no gap for it).
     let panel = Container::new()
         .add(Box::new(inner))
         .with_fit_height(true)
@@ -155,7 +156,7 @@ pub(crate) fn build_search_panel(font: Arc<Font>, state: SearchState) -> Box<dyn
         .with_corner_radius(10.0)
         .with_inner_padding(Insets {
             top: 6.0,
-            bottom: 12.0,
+            bottom: 6.0,
             left: 10.0,
             right: 10.0,
         });
@@ -450,6 +451,14 @@ impl Widget for SearchResultsWidget {
         Size::new(available.width, height)
     }
 
+    /// With no rows to show, hide entirely so the parent `FlexColumn`
+    /// reserves no gap for the empty list (keeps the text field vertically
+    /// centred in the panel). Freshness contract: `FlexColumn` reads
+    /// `is_visible` after this widget's `layout` ran for the same pass.
+    fn is_visible(&self) -> bool {
+        !self.matches.borrow().is_empty()
+    }
+
     fn hit_test(&self, local_pos: Point) -> bool {
         local_pos.x >= 0.0
             && local_pos.x <= self.bounds.width
@@ -604,6 +613,108 @@ mod tests {
         assert!(!state.has_target.get(), "tap should drop the target");
         assert!(state.no_target.get(), "tap should return to input mode");
         assert!(state.target.borrow().is_none());
+    }
+
+    /// The floating search panel must stay centred with its 10 px side
+    /// margins at every viewport width and DPI scale — regression test for
+    /// the "dialog flush against the screen edge / cut off on the left"
+    /// bug (root cause fixed in agg-gui's `Stack` aligned-child layout,
+    /// which used to drop margins when the viewport was narrower than the
+    /// panel's max width).
+    #[test]
+    fn search_panel_stays_centered_with_margins_at_all_scales() {
+        let font = crate::load_default_font();
+        for (ds, avail_w) in [(1.0, 1200.0), (1.0, 380.0), (1.5, 345.0), (3.0, 229.0)] {
+            let state = make_state("");
+            state.active.set(true);
+            let panel = build_search_panel(Arc::clone(&font), state);
+            let mut stack = agg_gui::widgets::Stack::new().add_aligned(panel);
+            agg_gui::set_device_scale(ds);
+            use agg_gui::widget::Widget as _;
+            stack.layout(Size::new(avail_w, 700.0));
+            let b = stack.children()[0].bounds();
+            agg_gui::set_device_scale(1.0);
+
+            let expected_w = (avail_w - 20.0).min(PANEL_MAX_W);
+            assert_eq!(
+                b.width, expected_w,
+                "panel width at ds={ds} avail={avail_w}: caps at max width \
+                 but never eats the 10px side margins"
+            );
+            let left_gap = b.x;
+            let right_gap = avail_w - (b.x + b.width);
+            assert!(
+                left_gap >= 10.0 && right_gap >= 10.0,
+                "panel must keep both margins (ds={ds} avail={avail_w}: \
+                 left={left_gap} right={right_gap})"
+            );
+            assert!(
+                (left_gap - right_gap).abs() < 1e-6,
+                "panel must be centred (ds={ds} avail={avail_w}: \
+                 left={left_gap} right={right_gap})"
+            );
+        }
+    }
+
+    /// Absolute (stack-relative) bounds of the first widget whose
+    /// `type_name` matches, searching depth-first.
+    fn find_abs(widget: &dyn Widget, name: &str, ox: f64, oy: f64) -> Option<Rect> {
+        let b = widget.bounds();
+        let (ax, ay) = (ox + b.x, oy + b.y);
+        if widget.type_name() == name {
+            return Some(Rect::new(ax, ay, b.width, b.height));
+        }
+        widget
+            .children()
+            .iter()
+            .find_map(|c| find_abs(c.as_ref(), name, ax, ay))
+    }
+
+    /// With no matches showing, the text field must sit vertically centred
+    /// in the panel — equal space above and below. Regression test for the
+    /// asymmetric-padding + phantom-results-gap combination that pushed
+    /// the field toward the top of the panel.
+    #[test]
+    fn search_field_is_vertically_centered_when_results_empty() {
+        let font = crate::load_default_font();
+        let state = make_state("");
+        state.active.set(true);
+        let panel = build_search_panel(font, state);
+        let mut stack = agg_gui::widgets::Stack::new().add_aligned(panel);
+        use agg_gui::widget::Widget as _;
+        stack.layout(Size::new(380.0, 700.0));
+
+        let panel_box = find_abs(&stack, "Container", 0.0, 0.0).expect("panel container");
+        let field = find_abs(&stack, "TextField", 0.0, 0.0).expect("text field");
+
+        let space_above = (panel_box.y + panel_box.height) - (field.y + field.height);
+        let space_below = field.y - panel_box.y;
+        assert!(
+            (space_above - space_below).abs() < 0.6,
+            "field must be vertically centred: {space_above} above vs {space_below} below"
+        );
+    }
+
+    /// When matches ARE showing, the rows keep a visible gap below the
+    /// input row instead of butting against it.
+    #[test]
+    fn results_keep_a_gap_below_the_input_row() {
+        let font = crate::load_default_font();
+        let state = make_state("sir");
+        state.active.set(true);
+        let panel = build_search_panel(font, state);
+        let mut stack = agg_gui::widgets::Stack::new().add_aligned(panel);
+        use agg_gui::widget::Widget as _;
+        stack.layout(Size::new(380.0, 700.0));
+
+        let field = find_abs(&stack, "TextField", 0.0, 0.0).expect("text field");
+        let results = find_abs(&stack, "SearchResultsWidget", 0.0, 0.0).expect("results");
+        assert!(results.height >= ROW_H, "'sir' should produce rows");
+        let gap = field.y - (results.y + results.height);
+        assert!(
+            (7.0..=9.0).contains(&gap),
+            "rows should sit one 8px gap below the field, got {gap}"
+        );
     }
 
     /// A tap below the populated rows (empty space) selects nothing.

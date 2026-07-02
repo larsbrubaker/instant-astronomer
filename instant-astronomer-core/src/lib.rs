@@ -68,10 +68,14 @@ pub fn load_default_font() -> Arc<Font> {
 /// core widget tree can request services (geolocation lookup, eventually
 /// device-orientation listener installation, etc.) without `cfg`-gating.
 pub trait AstronomerPlatform: 'static {
-    /// Trigger a geolocation lookup. Implementations should asynchronously
-    /// update [`AstronomerHandles::latitude`] / `longitude` and call
-    /// `agg_gui::animation::request_draw` when results arrive.
-    fn request_geolocation(&self);
+    /// Trigger a geolocation lookup. When coordinates arrive (possibly
+    /// asynchronously), call `apply(latitude_deg, longitude_deg)` — the
+    /// core builds `apply` over its own live state cells and it takes
+    /// care of the redraw, so implementations never touch app state
+    /// directly. (An earlier design asked implementations to update the
+    /// handles themselves; both shells ended up writing into private
+    /// cells nothing read, so the Locate button silently did nothing.)
+    fn request_geolocation(&self, apply: Rc<dyn Fn(f64, f64)>);
 
     /// Minutes east of UTC for the device's wall clock, with DST applied
     /// (e.g. PDT = -420, IST = +330). Used purely for the clock readout

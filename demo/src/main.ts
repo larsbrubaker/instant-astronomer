@@ -1,8 +1,16 @@
 // Browser bootstrap for Instant-Astronomer's single Rust/agg-gui app.
 //
-// Owns: WASM load, canvas sizing, input forwarding, the
-// requestAnimationFrame loop, navigator.geolocation, and the
-// `deviceorientation` (or `deviceorientationabsolute`) bridge.
+// The Rust wasm module (demo-wgpu's `web_shell`) owns everything
+// platform-generic the moment it loads: canvas sizing, the frame loop,
+// pointer / wheel / keyboard / clipboard input, DPR tracking, and client
+// platform detection. This file owns only what genuinely cannot live in
+// wasm:
+//
+// - loading the wasm module itself,
+// - `navigator.geolocation` auto-request at page load (the in-app
+//   "Locate me" button goes through Rust directly),
+// - the `deviceorientation` bridge, because iOS requires a user-gesture
+//   permission prompt (a DOM overlay) before events flow.
 //
 // Must NOT render visible UI beyond the canvas + the iOS sensor-permission
 // gate — every button, label, toggle, status readout, etc. is painted by
@@ -11,35 +19,9 @@
 // wasm-pack --no-typescript does not emit .d.ts files; we reference the
 // generated module structurally instead.
 type WasmModule = {
-  default: (url?: string | URL) => Promise<unknown>;
-  draw_frame: () => boolean;
-  mark_dirty: () => void;
-  wants_draw: () => boolean;
-  on_mouse_move: (x: number, y: number) => void;
-  on_mouse_down: (
-    x: number,
-    y: number,
-    button: number,
-    shift: boolean,
-    ctrl: boolean,
-    alt: boolean,
-    meta: boolean,
-  ) => void;
-  on_mouse_up: (
-    x: number,
-    y: number,
-    button: number,
-    shift: boolean,
-    ctrl: boolean,
-    alt: boolean,
-    meta: boolean,
-  ) => void;
+  default: (url?: string | URL | { module_or_path: string | URL }) => Promise<unknown>;
   on_device_orientation: (alpha: number, beta: number, gamma: number) => void;
   set_location_degrees: (latitudeDeg: number, longitudeDeg: number) => void;
-  set_timestamp_ms: (timestampMs: number) => void;
-  set_client_platform: (name: string, pointerCoarse: boolean) => void;
-  set_device_pixel_ratio: (dpr: number) => void;
-  software_keyboard_visible: () => boolean;
 };
 
 // iOS DeviceOrientationEvent requires `requestPermission()` — typed as an
@@ -90,50 +72,10 @@ async function loadWasm(): Promise<WasmModule> {
   const url = new URL("pkg/instant_astronomer_wasm.js", document.baseURI).href;
   const mod = (await import(/* @vite-ignore */ url)) as WasmModule;
   const wasmUrl = new URL("pkg/instant_astronomer_wasm_bg.wasm", document.baseURI).href;
-  // wasm-bindgen 0.2.x deprecated the positional-URL init signature
-  // in favour of an options object. Passing `{module_or_path}`
-  // silences the console warning and is the only form supported by
-  // wasm-bindgen 0.3.
+  // Module init runs the Rust `#[wasm_bindgen(start)]`, which boots the
+  // whole shell (input, frame loop, rendering).
   await mod.default({ module_or_path: wasmUrl });
   return mod;
-}
-
-function resizeToDPR(canvas: HTMLCanvasElement): { w: number; h: number } {
-  const dpr = window.devicePixelRatio || 1;
-  const w = Math.max(1, Math.floor(canvas.clientWidth * dpr));
-  const h = Math.max(1, Math.floor(canvas.clientHeight * dpr));
-  if (canvas.width !== w || canvas.height !== h) {
-    canvas.width = w;
-    canvas.height = h;
-  }
-  return { w, h };
-}
-
-function wirePointerInput(wasm: WasmModule): void {
-  const dpr = () => window.devicePixelRatio || 1;
-  const local = (ev: PointerEvent) => {
-    const rect = canvas.getBoundingClientRect();
-    const x = (ev.clientX - rect.left) * dpr();
-    const y = (ev.clientY - rect.top) * dpr();
-    return { x, y };
-  };
-  canvas.addEventListener("pointermove", (ev) => {
-    const { x, y } = local(ev);
-    wasm.on_mouse_move(x, y);
-  });
-  canvas.addEventListener("pointerdown", (ev) => {
-    canvas.setPointerCapture(ev.pointerId);
-    const { x, y } = local(ev);
-    wasm.on_mouse_down(x, y, ev.button, ev.shiftKey, ev.ctrlKey, ev.altKey, ev.metaKey);
-  });
-  canvas.addEventListener("pointerup", (ev) => {
-    const { x, y } = local(ev);
-    wasm.on_mouse_up(x, y, ev.button, ev.shiftKey, ev.ctrlKey, ev.altKey, ev.metaKey);
-  });
-  canvas.addEventListener("pointercancel", (ev) => {
-    const { x, y } = local(ev);
-    wasm.on_mouse_up(x, y, ev.button, ev.shiftKey, ev.ctrlKey, ev.altKey, ev.metaKey);
-  });
 }
 
 /// Subscribe to the browser's orientation events.
@@ -224,43 +166,8 @@ function requestGeolocation(wasm: WasmModule): void {
   );
 }
 
-function detectClientPlatform(): string {
-  const nav = navigator as Navigator & { userAgentData?: { platform?: string } };
-  return (
-    nav.userAgentData?.platform ||
-    navigator.userAgent ||
-    navigator.platform ||
-    "other"
-  );
-}
-
-function detectPointerCoarse(): boolean {
-  // True on touch-primary devices (phones, tablets, iPad-mode Safari)
-  // and the trigger for the agg-gui on-screen keyboard taking over from
-  // the native iOS / Android keyboard.
-  return typeof window.matchMedia === "function"
-    ? window.matchMedia("(pointer: coarse)").matches
-    : false;
-}
-
 async function boot(): Promise<void> {
   const wasm = await loadWasm();
-  // Tell agg-gui about the device before we paint a frame:
-  // - device-pixel ratio so HiDPI mobile screens render glyphs at the
-  //   right physical size (without this, a Pixel 8 paints everything
-  //   at 1/3 the intended size and the user can't read it),
-  // - input profile + UA so the on-screen keyboard auto-enables on
-  //   touch devices and picks the right per-OS chrome.
-  wasm.set_device_pixel_ratio(window.devicePixelRatio || 1);
-  wasm.set_client_platform(detectClientPlatform(), detectPointerCoarse());
-
-  // Keep DPR fresh: dragging a window between monitors or rotating
-  // a tablet can change devicePixelRatio mid-session.
-  window.addEventListener("resize", () => {
-    wasm.set_device_pixel_ratio(window.devicePixelRatio || 1);
-  });
-
-  wirePointerInput(wasm);
   requestGeolocation(wasm);
 
   if (needsIosPermissionGate()) {
@@ -279,16 +186,6 @@ async function boot(): Promise<void> {
   } else {
     subscribeOrientation(wasm);
   }
-
-  // Animation loop — paint every frame so the celestial-body clock stays
-  // current. `wants_draw()` would let us idle when nothing's moving, but
-  // the projection depends on wall time, so we keep the loop hot.
-  const frame = () => {
-    resizeToDPR(canvas);
-    wasm.draw_frame();
-    requestAnimationFrame(frame);
-  };
-  requestAnimationFrame(frame);
 }
 
 void boot().catch(showBootError);
