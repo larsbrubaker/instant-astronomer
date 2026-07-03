@@ -16,6 +16,10 @@
 // gate — every button, label, toggle, status readout, etc. is painted by
 // agg-gui inside the canvas. See CLAUDE.md.
 
+// Build stamp injected by vite (see vite.config.ts `define`) — appended
+// to the pkg/ asset URLs so a new deploy always busts the browser cache.
+declare const __BUILD_ID__: string;
+
 // wasm-pack --no-typescript does not emit .d.ts files; we reference the
 // generated module structurally instead.
 type WasmModule = {
@@ -69,9 +73,10 @@ async function loadWasm(): Promise<WasmModule> {
   // of where Vite places the bundle (under `/assets/` after build).
   // `import.meta.env.BASE_URL` was returning `"/"` on GitHub Pages
   // under the `/instant-astronomer/` sub-path which broke the load.
-  const url = new URL("pkg/instant_astronomer_wasm.js", document.baseURI).href;
+  const v = `?v=${__BUILD_ID__}`;
+  const url = new URL(`pkg/instant_astronomer_wasm.js${v}`, document.baseURI).href;
   const mod = (await import(/* @vite-ignore */ url)) as WasmModule;
-  const wasmUrl = new URL("pkg/instant_astronomer_wasm_bg.wasm", document.baseURI).href;
+  const wasmUrl = new URL(`pkg/instant_astronomer_wasm_bg.wasm${v}`, document.baseURI).href;
   // Module init runs the Rust `#[wasm_bindgen(start)]`, which boots the
   // whole shell (input, frame loop, rendering).
   await mod.default({ module_or_path: wasmUrl });

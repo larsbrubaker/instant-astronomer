@@ -8,6 +8,13 @@ import { phoneShots } from "./vite-plugins/phone-shots";
 // and locally under `vite dev`.
 export default defineConfig(({ command }) => ({
   base: "./",
+  // Stamped into the bundle and appended to the wasm-pack asset URLs in
+  // main.ts. The pkg/ files are served with stable (unhashed) names, so
+  // without this browsers keep serving a stale cached wasm long after a
+  // deploy — phones "never got the update".
+  define: {
+    __BUILD_ID__: JSON.stringify(Date.now().toString(36)),
+  },
   // `command === "serve"` covers `vite` (dev) and `vite preview`. The
   // basic-ssl plugin serves a self-signed cert so the dev server is a
   // secure context, which the phone needs for navigator.geolocation and
