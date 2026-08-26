@@ -1,14 +1,18 @@
 //! # Native Shell for Instant-Astronomer
 //!
 //! Thinnest possible desktop shim: everything platform-generic (winit
-//! window + event loop, wgpu surface, input forwarding, frame painting)
-//! lives in `demo_wgpu::native_shell`. This file contributes only what is
-//! genuinely specific to Instant-Astronomer on desktop: the
-//! [`AstronomerPlatform`] implementation and the per-frame clock tick.
+//! window + event loop, wgpu surface, input forwarding, frame painting,
+//! device-loss recovery) lives in the published `agg-gui-shell` crate.
+//! This file contributes only what is genuinely specific to
+//! Instant-Astronomer on desktop: the [`AstronomerPlatform`]
+//! implementation and the per-frame clock tick.
 
 use std::rc::Rc;
 
-use instant_astronomer_core::{build_astronomer_app, load_default_font, AstronomerPlatform};
+use agg_gui_shell::{run, Frame, ShellConfig, ShellError, ShellHost};
+use instant_astronomer_core::{
+    build_astronomer_app, load_default_font, AstronomerHandles, AstronomerPlatform,
+};
 
 /// Desktop implementation of the platform capability surface.
 struct NativePlatform;
@@ -32,23 +36,31 @@ impl AstronomerPlatform for NativePlatform {
     }
 }
 
-fn main() {
-    let (app, handles) = build_astronomer_app(load_default_font(), NativePlatform);
+/// The app-side seam of the shared shell: everything Instant-Astronomer
+/// does *around* the shell-owned frame loop, which today is only the
+/// projection-clock tick.
+struct AstronomerHost {
+    handles: AstronomerHandles,
+}
 
-    demo_wgpu::native_shell::run(
-        demo_wgpu::NativeShellConfig {
-            title: "Instant-Astronomer",
-            logical_size: (1024.0, 768.0),
+impl ShellHost for AstronomerHost {
+    // Advance the projection clock every painted frame so celestial
+    // bodies animate.
+    fn on_frame(&mut self, _app: &mut agg_gui::App, _frame: &Frame) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        self.handles.timestamp_ms.set(now);
+    }
+}
+
+fn main() -> Result<(), ShellError> {
+    run(
+        ShellConfig::new("Instant-Astronomer").with_logical_size(1024.0, 768.0),
+        |_init| {
+            let (app, handles) = build_astronomer_app(load_default_font(), NativePlatform);
+            Ok((app, AstronomerHost { handles }))
         },
-        app,
-        // Advance the projection clock every painted frame so celestial
-        // bodies animate.
-        move || {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as i64;
-            handles.timestamp_ms.set(now);
-        },
-    );
+    )
 }

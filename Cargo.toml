@@ -6,13 +6,19 @@ default-members = ["instant-astronomer-core", "instant-astronomer-native"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.78"
+rust-version = "1.87"
 authors = ["Lars Brubaker <larsbrubaker@matterhackers.com>"]
 license = "MIT"
 repository = "https://github.com/larsbrubaker/instant-astronomer"
 
 [workspace.dependencies]
-agg-gui = "0.2"
+agg-gui = "0.5"
+# The published wgpu renderer and native winit shell extracted from demo code.
+agg-gui-wgpu = "0.5.1"
+agg-gui-shell = "0.5"
+# The browser shell (`web_shell`: canvas + rAF loop + DOM input) has no
+# published crate yet — the wasm shim still takes it from the repo-only
+# demo-wgpu shim, which re-exports agg-gui-wgpu underneath.
 demo-wgpu = { path = "../agg-gui/demo-wgpu", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -26,12 +32,19 @@ nalgebra = "0.33"
 # ---------------------------------------------------------------------------
 [patch.crates-io]
 agg-gui = { path = "../agg-gui/agg-gui" }
+agg-gui-wgpu = { path = "../agg-gui/agg-gui-wgpu" }
+agg-gui-shell = { path = "../agg-gui/agg-gui-shell" }
 
 # ---------------------------------------------------------------------------
 # Optimize dependencies in debug builds. The agg-rust software rasterizer is
 # expensive unoptimized — without this dev frame time drops sharply. Mirrors
-# agg-gui's own workspace profile.
+# agg-gui's own workspace profile. The renderer's inlined hot path also
+# monomorphizes into *our* crates, so first-party code needs opt-level 1 too
+# (at 0, frame times are ~10× worse).
 # ---------------------------------------------------------------------------
+[profile.dev]
+opt-level = 1
+
 [profile.dev.package."*"]
 opt-level = 2
 

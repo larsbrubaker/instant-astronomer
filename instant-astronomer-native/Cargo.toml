@@ -16,9 +16,9 @@ test = false
 [dependencies]
 instant-astronomer-core = { path = "../instant-astronomer-core" }
 agg-gui = { workspace = true, features = ["clipboard"] }
-# The winit event loop, wgpu surface, and input plumbing all live in
-# demo-wgpu's `native_shell` — this crate is only the app-specific glue.
-demo-wgpu = { workspace = true }
+# The winit event loop, wgpu surface, and input plumbing all live in the
+# published agg-gui-shell crate — this crate is only the app-specific glue.
+agg-gui-shell = { workspace = true }
 # `time` with `local-offset` so the clock readout shows real DST-correct
 # local time on native (no IANA tz lookup; uses OS time zone APIs).
 time = { version = "0.3", features = ["local-offset"] }

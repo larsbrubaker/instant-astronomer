@@ -14,6 +14,10 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 instant-astronomer-core = { path = "../instant-astronomer-core" }
 agg-gui = { workspace = true }
+# The published renderer `web_shell` paints through.
+agg-gui-wgpu = { workspace = true }
+# Repo-only shim, kept solely for `web_shell` (canvas + rAF loop + DOM
+# input) — there is no published browser shell crate yet.
 demo-wgpu = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
