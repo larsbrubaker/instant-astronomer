@@ -12,10 +12,10 @@ license = "MIT"
 repository = "https://github.com/larsbrubaker/instant-astronomer"
 
 [workspace.dependencies]
-agg-gui = "0.5"
+agg-gui = "0.5.1"
 # The published wgpu renderer and native winit shell extracted from demo code.
-agg-gui-wgpu = "0.5.2"
-agg-gui-shell = "0.5.1"
+agg-gui-wgpu = "0.5.3"
+agg-gui-shell = "0.5.2"
 # The browser shell (`web_shell`: canvas + rAF loop + DOM input) has no
 # published crate yet — the wasm shim still takes it from the repo-only
 # demo-wgpu shim, which re-exports agg-gui-wgpu underneath.
